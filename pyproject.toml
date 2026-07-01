@@ -42,6 +42,7 @@ wandb = [
 
 [project.scripts]
 reliquary = "reliquary.cli.main:app"
+reliquary-harness = "harness.cli:app"
 
 [build-system]
 requires = ["hatchling"]
