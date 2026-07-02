@@ -8,7 +8,10 @@ from harness.probe_logic import (
     predicts_in_zone,
     probe_step,
 )
+from harness.log import get_logger
 from harness.scoring import ProbeOutcome, classify_probe_outcome
+
+logger = get_logger("probe")
 
 
 def run_probe(
@@ -31,8 +34,17 @@ def run_probe(
     decision = "continue"
     p_hat = 0.0
     confidence: str = "low"
+    sample_n = 0
 
     while decision == "continue":
+        sample_n += 1
+        logger.debug(
+            "probe idx=%d sample %d (max %d): generating up to %d tokens",
+            prompt_idx,
+            sample_n,
+            cfg.max_samples,
+            cfg.max_probe_tokens,
+        )
         record = generate_rollout_tokens(
             model,
             tokenizer,
@@ -52,6 +64,14 @@ def run_probe(
         else:
             rewards.append(1.0 if outcome == "success" else 0.0)
         decision, p_hat, confidence = probe_step(outcomes, config=cfg)
+        logger.debug(
+            "probe idx=%d sample %d outcome=%s decision=%s p_hat=%.3f",
+            prompt_idx,
+            sample_n,
+            outcome,
+            decision,
+            p_hat,
+        )
 
     resolved = [o for o in outcomes if o != "unknown"]
     successes = sum(1 for o in resolved if o == "success")

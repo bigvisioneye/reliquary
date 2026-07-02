@@ -102,3 +102,17 @@ in calibration. The report includes `unknown_rate` to diagnose insufficient prob
 ```bash
 pytest --confcutdir=tests/harness -q tests/harness/
 ```
+
+## Progress logging (long runs / nohup)
+
+`report` and `calibrate` emit timestamped progress logs by default (`INFO`).
+Use `--log-level DEBUG` for per-probe-sample detail.
+
+For `nohup`, use unbuffered stdout so lines appear immediately:
+
+```bash
+PYTHONUNBUFFERED=1 nohup python3 -u -m harness report ... > harness_out/report.log 2>&1 &
+tail -f harness_out/report.log
+```
+
+Example log stages: model load → prefilter candidates → per-prompt probe/label → GRAIL → latency → write artifacts.

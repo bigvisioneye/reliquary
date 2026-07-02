@@ -16,6 +16,12 @@ from harness.config import (
 app = typer.Typer(help="Reliquary offline calibration harness.")
 
 
+def _configure_logging(log_level: str) -> None:
+    from harness.log import configure_harness_logging
+
+    configure_harness_logging(log_level)  # type: ignore[arg-type]
+
+
 def _parse_prompt_list(prompts: str, count: int, seed: int) -> list[int]:
     if prompts.strip():
         return [int(p.strip()) for p in prompts.split(",") if p.strip()]
@@ -55,10 +61,21 @@ def _load_model_and_data(
     cache_dir: str,
 ):
     from harness.data import OpenMathData
+    from harness.log import get_logger
     from harness.model import ensure_cache_dir, load_checkpoint
 
+    log = get_logger("cli")
     resolve_runtime_config(device=device, attn=attn, dtype=dtype)
+    log.info("loading OpenMath dataset")
     data = OpenMathData.load()
+    log.info(
+        "loading checkpoint %s@%s (device=%s attn=%s dtype=%s)",
+        checkpoint_repo_id,
+        checkpoint_revision,
+        device,
+        attn,
+        dtype,
+    )
     loaded = load_checkpoint(
         checkpoint_repo_id=checkpoint_repo_id,
         checkpoint_revision=checkpoint_revision,
@@ -67,6 +84,7 @@ def _load_model_and_data(
         attn=attn,
         dtype=dtype,
     )
+    log.info("checkpoint loaded")
     return data, loaded
 
 
@@ -79,11 +97,18 @@ def _maybe_load_vllm_engine(
 ):
     if gen_backend != "vllm":
         return None
+    from harness.log import get_logger
     from harness.vllm_backend import load_vllm_generator
 
+    log = get_logger("cli")
     model_path = getattr(loaded.model, "name_or_path", None)
     if not model_path:
         raise ValueError("could not resolve model path for vLLM backend")
+    log.info(
+        "loading vLLM engine (gpu_mem_util=%.2f max_model_len=%s)",
+        gpu_mem_util,
+        max_model_len,
+    )
     return load_vllm_generator(
         model_path,
         gpu_memory_utilization=gpu_mem_util,
@@ -234,10 +259,22 @@ def calibrate_cmd(
     max_model_len: int = typer.Option(0, help="Optional vLLM max model length."),
     csv_out: str = typer.Option("harness_out/calibration.csv", help="Per-prompt CSV path."),
     report_out: str = typer.Option("harness_out/calibration_report.json", help="Summary JSON path."),
+    log_level: str = typer.Option("INFO", help="Log level: DEBUG, INFO, WARNING, ERROR."),
 ) -> None:
     from harness.calibrate import run_calibration
     from harness.calibrate_metrics import write_calibration_csv, write_calibration_report
+    from harness.log import get_logger
     from harness.probe_logic import ProbeConfig
+
+    _configure_logging(log_level)
+    log = get_logger("cli")
+    log.info(
+        "calibrate: count=%d sample_mode=%s max_probe_tokens=%d max_label_tokens=%d",
+        count,
+        sample_mode,
+        max_probe_tokens,
+        max_label_tokens,
+    )
 
     data, loaded = _load_model_and_data(
         checkpoint_repo_id, checkpoint_revision, device, attn, dtype, cache_dir,
@@ -412,15 +449,33 @@ def report_cmd(
         "",
         help="Standalone calibration JSON (default: harness_out/calibration_report.json).",
     ),
+    log_level: str = typer.Option("INFO", help="Log level: DEBUG, INFO, WARNING, ERROR."),
 ) -> None:
+    from harness.log import get_logger
     from harness.probe_logic import ProbeConfig
     from harness.report import run_full_report, write_report_artifacts
+
+    _configure_logging(log_level)
+    log = get_logger("cli")
 
     runtime = resolve_runtime_config(device=device, attn=attn, dtype=dtype)
     run_grail = not skip_grail
     run_latency = not skip_grail
     if run_grail:
         require_flash_attention_for_grail(runtime)
+
+    log.info(
+        "report: count=%d sample_mode=%s device=%s gen_backend=%s "
+        "max_probe_tokens=%d max_label_tokens=%d jitter_repeats=%d skip_grail=%s",
+        count,
+        sample_mode,
+        device,
+        gen_backend,
+        max_probe_tokens,
+        max_label_tokens,
+        jitter_repeats,
+        skip_grail,
+    )
 
     data, loaded = _load_model_and_data(
         checkpoint_repo_id, checkpoint_revision, device, attn, dtype, cache_dir,

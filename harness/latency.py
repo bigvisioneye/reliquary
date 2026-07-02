@@ -15,6 +15,9 @@ from harness.generation import (
 from harness.grail_build import build_grail_commit
 from harness.grail_check import check_grail_commit
 from harness.latency_metrics import LatencyReport, LatencyStats, percentile, suggest_parallel_workers
+from harness.log import get_logger
+
+logger = get_logger("latency")
 
 
 def _time_proof_only(
@@ -45,7 +48,12 @@ def measure_latency(
     vllm_engine: Any | None = None,
 ) -> LatencyReport:
     gen_times: list[float] = []
-    for _ in range(generation_runs):
+    logger.info(
+        "timing %d batched 8-rollout generation runs (gen_backend=%s)",
+        generation_runs,
+        gen_backend,
+    )
+    for run_i in range(1, generation_runs + 1):
         t0 = time.perf_counter()
         generate_m_rollouts(
             model,
@@ -55,12 +63,15 @@ def measure_latency(
             gen_backend=gen_backend,  # type: ignore[arg-type]
             vllm_engine=vllm_engine,
         )
-        gen_times.append(time.perf_counter() - t0)
+        elapsed = time.perf_counter() - t0
+        gen_times.append(elapsed)
+        logger.info("generation run %d/%d: %.1fs", run_i, generation_runs, elapsed)
 
     proof_times: list[float] = []
     proof_batch_times: list[float] = []
 
     if proofs_batched:
+        logger.info("timing %d batched proof runs over 8 rollouts", proof_runs)
         batch_generations = generate_m_rollout_dicts(
             model,
             tokenizer,
@@ -69,13 +80,16 @@ def measure_latency(
             gen_backend=gen_backend,  # type: ignore[arg-type]
             vllm_engine=vllm_engine,
         )
-        for _ in range(proof_runs):
+        for run_i in range(1, proof_runs + 1):
             t0 = time.perf_counter()
             for generation in batch_generations:
                 commit = build_grail_commit(model, tokenizer, generation, randomness)
                 check_grail_commit(commit, model, randomness, tokenizer=tokenizer)
-            proof_batch_times.append(time.perf_counter() - t0)
+            elapsed = time.perf_counter() - t0
+            proof_batch_times.append(elapsed)
+            logger.info("proof batch run %d/%d: %.1fs", run_i, proof_runs, elapsed)
     else:
+        logger.info("timing %d per-rollout proof runs", proof_runs)
         proof_generation = rollout_tokens_to_generation_dict(
             generate_rollout_tokens(
                 model,
@@ -85,15 +99,15 @@ def measure_latency(
                 vllm_engine=vllm_engine,
             ),
         )
-        for _ in range(proof_runs):
-            proof_times.append(
-                _time_proof_only(
-                    model=model,
-                    tokenizer=tokenizer,
-                    generation=proof_generation,
-                    randomness=randomness,
-                )
+        for run_i in range(1, proof_runs + 1):
+            elapsed = _time_proof_only(
+                model=model,
+                tokenizer=tokenizer,
+                generation=proof_generation,
+                randomness=randomness,
             )
+            proof_times.append(elapsed)
+            logger.info("proof run %d/%d: %.1fs", run_i, proof_runs, elapsed)
 
     gen_median = percentile(gen_times, 0.5)
     gen_p90 = percentile(gen_times, 0.9)

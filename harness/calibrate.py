@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import Any
 
 from harness.calibrate_metrics import (
@@ -14,10 +15,13 @@ from harness.calibrate_metrics import (
     validate_calibration_report,
 )
 from harness.label import true_label
+from harness.log import get_logger
 from harness.probe import run_probe
 from harness.probe_logic import ProbeConfig, ProbeResult
 from harness.sampling import SampleMode, effective_sample_mode
 from harness.slice import filter_prompt_indices, slice_for_window
+
+logger = get_logger("calibrate")
 
 
 def _prefilter_category(probe: ProbeResult) -> str:
@@ -49,7 +53,16 @@ def prefilter_prompt_indices(
         extreme_same_threshold=probe_config.extreme_same_threshold,
     )
     buckets: dict[str, list[int]] = {"frontier": [], "other": [], "extreme": []}
-    for idx in candidates:
+    n_candidates = len(candidates)
+    logger.info(
+        "prefilter: probing %d candidates (cheap 2-sample probe, max_probe_tokens=%d)",
+        n_candidates,
+        cheap_cfg.max_probe_tokens,
+    )
+    prefilter_started = time.perf_counter()
+    for i, idx in enumerate(candidates, start=1):
+        logger.info("prefilter: candidate %d/%d prompt_idx=%d", i, n_candidates, idx)
+        t0 = time.perf_counter()
         problem = env.get_problem(idx)
         probe = run_probe(
             model=model,
@@ -60,7 +73,17 @@ def prefilter_prompt_indices(
             gen_backend=gen_backend,  # type: ignore[arg-type]
             vllm_engine=vllm_engine,
         )
-        buckets[_prefilter_category(probe)].append(idx)
+        category = _prefilter_category(probe)
+        buckets[category].append(idx)
+        logger.info(
+            "prefilter: candidate %d/%d done in %.1fs category=%s decision=%s p_hat=%.3f",
+            i,
+            n_candidates,
+            time.perf_counter() - t0,
+            category,
+            probe.decision,
+            probe.p_hat,
+        )
 
     for pool in buckets.values():
         rng.shuffle(pool)
@@ -92,7 +115,19 @@ def prefilter_prompt_indices(
                     break
                 if idx not in selected:
                     selected.append(idx)
-    return selected[:count]
+    selected = selected[:count]
+    logger.info(
+        "prefilter: selected %d/%d prompts in %.1fs "
+        "(frontier=%d other=%d extreme=%d) indices=%s",
+        len(selected),
+        count,
+        time.perf_counter() - prefilter_started,
+        picked["frontier"],
+        picked["other"],
+        picked["extreme"],
+        selected,
+    )
+    return selected
 
 
 def run_calibration(
@@ -126,6 +161,17 @@ def run_calibration(
     )
 
     indices = list(prompt_indices)
+    logger.info(
+        "calibration start: sample_mode=%s requested=%d candidates=%d "
+        "slice=[%d,%d) max_label_tokens=%d gen_backend=%s",
+        mode,
+        requested_prompts or len(indices),
+        len(indices),
+        bounds[0],
+        bounds[1],
+        max_label_tokens,
+        gen_backend,
+    )
     if mode == "prefilter":
         indices = prefilter_prompt_indices(
             model=model,
@@ -139,7 +185,14 @@ def run_calibration(
             vllm_engine=vllm_engine,
         )
     elif mode == "slice":
+        before = len(indices)
         indices = filter_prompt_indices(indices, bounds, enforce=True)
+        if before != len(indices):
+            logger.info("slice filter: %d -> %d prompts", before, len(indices))
+
+    n_prompts = len(indices)
+    logger.info("calibrating %d prompts (probe then true_label per prompt)", n_prompts)
+    calibration_started = time.perf_counter()
 
     rows: list[CalibrationRow] = []
     jitter_summaries = []
@@ -148,8 +201,18 @@ def run_calibration(
     label_rollouts_total = 0
     label_truncated_unscorable_total = 0
 
-    for idx in indices:
+    for prompt_i, idx in enumerate(indices, start=1):
+        prompt_started = time.perf_counter()
+        logger.info(
+            "prompt %d/%d: idx=%d — running probe (max_samples=%d max_probe_tokens=%d)",
+            prompt_i,
+            n_prompts,
+            idx,
+            cfg.max_samples,
+            cfg.max_probe_tokens,
+        )
         problem = env.get_problem(idx)
+        probe_t0 = time.perf_counter()
         probe = run_probe(
             model=model,
             tokenizer=tokenizer,
@@ -162,6 +225,25 @@ def run_calibration(
         )
         probe_samples_total += probe.probe_samples_used
         probe_unknowns_total += probe.unknowns
+        logger.info(
+            "prompt %d/%d: probe done in %.1fs decision=%s p_hat=%.3f "
+            "samples=%d unknowns=%d predicted_in_zone=%s",
+            prompt_i,
+            n_prompts,
+            time.perf_counter() - probe_t0,
+            probe.decision,
+            probe.p_hat,
+            probe.probe_samples_used,
+            probe.unknowns,
+            probe.predicted_in_zone,
+        )
+        logger.info(
+            "prompt %d/%d: running true_label (8 rollouts, max_label_tokens=%d)",
+            prompt_i,
+            n_prompts,
+            max_label_tokens,
+        )
+        label_t0 = time.perf_counter()
         label = true_label(
             model=model,
             tokenizer=tokenizer,
@@ -176,6 +258,20 @@ def run_calibration(
         )
         label_rollouts_total += label.label_rollouts
         label_truncated_unscorable_total += label.truncated_unscorable_rollouts
+        logger.info(
+            "prompt %d/%d: label done in %.1fs k=%d sigma=%.3f in_zone=%s "
+            "trunc_unscorable=%d/%d (prompt total %.1fs, elapsed %.1fs)",
+            prompt_i,
+            n_prompts,
+            time.perf_counter() - label_t0,
+            label.k,
+            label.sigma,
+            label.in_zone,
+            label.truncated_unscorable_rollouts,
+            label.label_rollouts,
+            time.perf_counter() - prompt_started,
+            time.perf_counter() - calibration_started,
+        )
         rows.append(
             CalibrationRow(
                 idx=idx,
@@ -190,6 +286,12 @@ def run_calibration(
         )
 
         if jitter_repeats > 0:
+            logger.info(
+                "prompt %d/%d: jitter repeats=%d",
+                prompt_i,
+                n_prompts,
+                jitter_repeats,
+            )
             k_vals: list[int] = []
             in_zone_flags: list[bool] = []
             for _ in range(jitter_repeats):
@@ -239,4 +341,15 @@ def run_calibration(
         rows=rows,
     )
     validate_calibration_report(report)
+    logger.info(
+        "calibration complete: n_prompts=%d precision=%.3f recall=%.3f f1=%.3f "
+        "unknown_rate=%.3f label_truncation_rate=%.3f total_time=%.1fs",
+        report.n_prompts,
+        metrics.precision,
+        metrics.recall,
+        metrics.f1,
+        balance.unknown_rate,
+        balance.label_truncation_rate,
+        time.perf_counter() - calibration_started,
+    )
     return report

@@ -15,9 +15,12 @@ from harness.calibrate_metrics import (
 from harness.latency import latency_report_dict, measure_latency
 from harness.grail_check import GrailCheckResult, run_grail_fidelity
 from harness.latency_metrics import LatencyReport
+from harness.log import get_logger
 from harness.probe_logic import ProbeConfig
 from harness.sampling import SampleMode, resolve_calibration_indices
 from harness.slice import slice_for_window
+
+logger = get_logger("report")
 
 
 @dataclass
@@ -75,10 +78,29 @@ def run_full_report(
     vllm_engine: Any | None = None,
 ) -> FullHarnessReport:
     import random
+    import time
 
+    report_started = time.perf_counter()
     rng = random.Random(seed)
     bounds = slice_for_window(randomness, env_name, len(env))
+    logger.info(
+        "full report start: count=%d sample_mode=%s seed=%d slice=[%d,%d) "
+        "gen_backend=%s max_label_tokens=%d max_probe_tokens=%d "
+        "jitter_repeats=%d run_grail=%s run_latency=%s",
+        prompt_count,
+        sample_mode,
+        seed,
+        bounds[0],
+        bounds[1],
+        gen_backend,
+        max_label_tokens,
+        probe_config.max_probe_tokens if probe_config else ProbeConfig().max_probe_tokens,
+        jitter_repeats,
+        run_grail,
+        run_latency,
+    )
     if prompt_indices is None:
+        logger.info("resolving prompt indices (sample_mode=%s)", sample_mode)
         indices = resolve_calibration_indices(
             env,
             count=prompt_count,
@@ -91,7 +113,9 @@ def run_full_report(
         )
     else:
         indices = prompt_indices
+    logger.info("candidate prompt indices (%d): %s", len(indices), indices)
 
+    logger.info("stage 1/3: calibration")
     calibration = run_calibration(
         model=model,
         tokenizer=tokenizer,
@@ -116,7 +140,13 @@ def run_full_report(
     grail_results: list[GrailCheckResult] = []
     if run_grail and calibration.rows:
         first_idx = calibration.rows[0].idx
+        logger.info(
+            "stage 2/3: GRAIL fidelity on prompt_idx=%d rollouts=%d",
+            first_idx,
+            grail_rollouts,
+        )
         probe_prompt = env.get_problem(first_idx)["prompt"]
+        grail_t0 = time.perf_counter()
         grail_results = run_grail_fidelity(
             model=model,
             tokenizer=tokenizer,
@@ -124,11 +154,28 @@ def run_full_report(
             randomness=randomness,
             rollouts=grail_rollouts,
         )
+        logger.info(
+            "GRAIL fidelity done in %.1fs all_passed=%s (%d rollouts)",
+            time.perf_counter() - grail_t0,
+            all(r.passed for r in grail_results),
+            len(grail_results),
+        )
+    elif run_grail:
+        logger.info("stage 2/3: GRAIL skipped (no calibration rows)")
 
     latency_report: LatencyReport | None = None
     if run_latency and calibration.rows:
         idx = latency_prompt_idx if latency_prompt_idx is not None else calibration.rows[0].idx
+        logger.info(
+            "stage 3/3: latency on prompt_idx=%d "
+            "(generation_runs=%d proof_runs=%d proofs_batched=%s)",
+            idx,
+            generation_runs,
+            proof_runs,
+            proofs_batched,
+        )
         problem = env.get_problem(idx)
+        latency_t0 = time.perf_counter()
         latency_report = measure_latency(
             model=model,
             tokenizer=tokenizer,
@@ -142,11 +189,20 @@ def run_full_report(
             gen_backend=gen_backend,
             vllm_engine=vllm_engine,
         )
+        logger.info(
+            "latency done in %.1fs cycle_p90=%.1fs suggested_workers=%d",
+            time.perf_counter() - latency_t0,
+            latency_report.cycle_p90_seconds,
+            latency_report.suggested_workers,
+        )
+    elif run_latency:
+        logger.info("stage 3/3: latency skipped (no calibration rows)")
 
     grail_payload = [asdict(r) for r in grail_results]
     jitter_band = _aggregate_jitter_band(calibration)
     suggested = latency_report.suggested_workers if latency_report else None
 
+    logger.info("full report finished in %.1fs", time.perf_counter() - report_started)
     return FullHarnessReport(
         checkpoint_repo_id=checkpoint_repo_id,
         checkpoint_revision=checkpoint_revision,
@@ -192,7 +248,9 @@ def write_report_artifacts(
     calibration_csv: str | Path,
     calibration_report_json: str | Path | None = None,
 ) -> None:
+    logger.info("writing report artifacts: json=%s csv=%s", report_json, calibration_csv)
     write_full_report(report_json, report)
     write_calibration_csv(calibration_csv, report.calibration.rows)
     cal_path = calibration_report_json or (Path(report_json).parent / "calibration_report.json")
     write_calibration_report(cal_path, report.calibration)
+    logger.info("wrote calibration_report: %s", cal_path)
