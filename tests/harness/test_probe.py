@@ -46,6 +46,25 @@ def test_probe_step_budget_exhausted() -> None:
     assert confidence == "medium"
 
 
+def test_probe_step_all_unknown_budget_exhausted_not_extreme() -> None:
+    cfg = ProbeConfig(max_samples=4, extreme_same_threshold=3)
+    decision, p_hat, confidence = probe_step(
+        ["unknown", "unknown", "unknown", "unknown"], config=cfg,
+    )
+    assert decision == "budget_exhausted"
+    assert decision not in ("too_easy", "too_hard")
+    assert p_hat == 0.0
+    assert confidence == "medium"
+
+
+def test_probe_unknowns_do_not_increment_extreme_streak() -> None:
+    cfg = ProbeConfig(max_samples=6, extreme_same_threshold=3)
+    decision, _, _ = probe_step(
+        ["unknown", "failure", "unknown", "failure", "unknown"], config=cfg,
+    )
+    assert decision == "continue"
+
+
 def test_probe_unknowns_do_not_count_as_failures() -> None:
     cfg = ProbeConfig(max_samples=6, extreme_same_threshold=3)
     outcomes = ["unknown", "unknown", "unknown", "success", "failure"]

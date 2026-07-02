@@ -13,7 +13,7 @@ ProbeDecision = Literal["continue", "in_zone_band", "too_easy", "too_hard", "bud
 @dataclass(frozen=True)
 class ProbeConfig:
     max_samples: int = 6
-    max_probe_tokens: int = 512
+    max_probe_tokens: int = 1536
     temperature: float = T_PROTO
     extreme_same_threshold: int = 3
 

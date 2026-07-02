@@ -145,3 +145,51 @@ def generate_m_rollouts(
             gen = gen[: eos_idx + 1]
         decoded.append(tokenizer.decode(gen))
     return decoded
+
+
+def generate_m_rollout_dicts(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    *,
+    max_new_tokens: int = MAX_NEW_TOKENS_PROTOCOL_CAP,
+    temperature: float = T_PROTO,
+    n_rollouts: int = M_ROLLOUTS,
+) -> list[dict]:
+    """Generate ``n_rollouts`` token dicts in one batched call (no decode/re-encode)."""
+    import torch
+
+    prompt_tokens = encode_prompt(tokenizer, prompt)
+    prompt_length = len(prompt_tokens)
+    eos_ids = resolve_eos_token_ids(model, tokenizer)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is None and eos_ids:
+        pad_token_id = min(eos_ids)
+
+    device = getattr(model, "device", "cpu")
+    input_tensor = torch.tensor([prompt_tokens] * n_rollouts, device=device)
+    attention_mask = torch.ones_like(input_tensor)
+    generate_kwargs: dict[str, Any] = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": True,
+        "temperature": temperature,
+        "top_p": TOP_P_PROTO,
+        "top_k": TOP_K_PROTO,
+        "pad_token_id": pad_token_id,
+        "attention_mask": attention_mask,
+    }
+    if eos_ids:
+        generate_kwargs["eos_token_id"] = sorted(eos_ids)
+
+    with torch.no_grad():
+        outputs = model.generate(input_tensor, **generate_kwargs)
+
+    rollouts: list[dict] = []
+    for i in range(n_rollouts):
+        seq = outputs[i].tolist()
+        gen = seq[prompt_length:]
+        eos_idx = first_eos_index(gen, eos_ids)
+        if eos_idx is not None:
+            gen = gen[: eos_idx + 1]
+        rollouts.append({"tokens": prompt_tokens + gen, "prompt_length": prompt_length})
+    return rollouts

@@ -51,3 +51,6 @@ class LatencyReport:
     suggested_workers: int
     window_seconds: float
     submission_cap: int
+    generation_is_batched: bool = True
+    proofs_batched: bool = False
+    proof_batch: LatencyStats | None = None

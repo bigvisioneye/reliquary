@@ -6,15 +6,89 @@ from typing import Any
 from harness.calibrate_metrics import (
     CalibrationReport,
     CalibrationRow,
+    build_calibration_balance,
     build_pr_curve,
     classification_metrics,
     compute_saved_per_in_zone,
     summarize_jitter,
+    validate_calibration_report,
 )
 from harness.label import true_label
 from harness.probe import run_probe
-from harness.probe_logic import ProbeConfig
+from harness.probe_logic import ProbeConfig, ProbeResult
+from harness.sampling import SampleMode, effective_sample_mode
 from harness.slice import filter_prompt_indices, slice_for_window
+
+
+def _prefilter_category(probe: ProbeResult) -> str:
+    if probe.decision == "in_zone_band":
+        return "frontier"
+    if probe.successes > 0 and probe.failures > 0:
+        return "frontier"
+    if probe.decision in ("too_easy", "too_hard"):
+        return "extreme"
+    return "other"
+
+
+def prefilter_prompt_indices(
+    *,
+    model: Any,
+    tokenizer: Any,
+    env: Any,
+    candidates: list[int],
+    count: int,
+    probe_config: ProbeConfig,
+    rng: random.Random,
+) -> list[int]:
+    cheap_cfg = ProbeConfig(
+        max_samples=2,
+        max_probe_tokens=probe_config.max_probe_tokens,
+        temperature=probe_config.temperature,
+        extreme_same_threshold=probe_config.extreme_same_threshold,
+    )
+    buckets: dict[str, list[int]] = {"frontier": [], "other": [], "extreme": []}
+    for idx in candidates:
+        problem = env.get_problem(idx)
+        probe = run_probe(
+            model=model,
+            tokenizer=tokenizer,
+            problem=problem,
+            prompt_idx=idx,
+            config=cheap_cfg,
+        )
+        buckets[_prefilter_category(probe)].append(idx)
+
+    for pool in buckets.values():
+        rng.shuffle(pool)
+
+    selected: list[int] = []
+    target_frontier = max(1, count * 2 // 5)
+    target_other = max(1, count * 2 // 5)
+    picked = {"frontier": 0, "other": 0, "extreme": 0}
+
+    for category in ("frontier", "other", "extreme"):
+        limit = (
+            target_frontier
+            if category == "frontier"
+            else target_other if category == "other" else count
+        )
+        for idx in buckets[category]:
+            if len(selected) >= count:
+                break
+            if category in ("frontier", "other") and picked[category] >= limit:
+                continue
+            if idx not in selected:
+                selected.append(idx)
+                picked[category] += 1
+
+    if len(selected) < count:
+        for category in ("frontier", "other", "extreme"):
+            for idx in buckets[category]:
+                if len(selected) >= count:
+                    break
+                if idx not in selected:
+                    selected.append(idx)
+    return selected[:count]
 
 
 def run_calibration(
@@ -30,20 +104,38 @@ def run_calibration(
     jitter_repeats: int = 0,
     randomness: str | None = None,
     enforce_slice: bool = False,
+    sample_mode: SampleMode = "uniform",
+    requested_prompts: int = 0,
     env_name: str = "openmathinstruct",
     rng: random.Random | None = None,
 ) -> CalibrationReport:
-    del rng
+    rng = rng or random.Random()
     cfg = probe_config or ProbeConfig()
+    mode = effective_sample_mode(sample_mode, enforce_slice)
     bounds = (
         slice_for_window(randomness, env_name, len(env))
         if randomness
         else (0, len(env))
     )
-    indices = filter_prompt_indices(prompt_indices, bounds, enforce=enforce_slice)
+
+    indices = list(prompt_indices)
+    if mode == "prefilter":
+        indices = prefilter_prompt_indices(
+            model=model,
+            tokenizer=tokenizer,
+            env=env,
+            candidates=indices,
+            count=requested_prompts or len(indices),
+            probe_config=cfg,
+            rng=rng,
+        )
+    elif mode == "slice":
+        indices = filter_prompt_indices(indices, bounds, enforce=True)
 
     rows: list[CalibrationRow] = []
     jitter_summaries = []
+    probe_samples_total = 0
+    probe_unknowns_total = 0
 
     for idx in indices:
         problem = env.get_problem(idx)
@@ -55,6 +147,8 @@ def run_calibration(
             config=cfg,
             bootstrap=bootstrap,
         )
+        probe_samples_total += probe.probe_samples_used
+        probe_unknowns_total += probe.unknowns
         label = true_label(
             model=model,
             tokenizer=tokenizer,
@@ -102,14 +196,24 @@ def run_calibration(
     metrics = classification_metrics(predicted, actual)
     pr_curve = build_pr_curve(p_hats, actual)
     saved = compute_saved_per_in_zone(rows)
+    balance = build_calibration_balance(
+        rows,
+        probe_samples_total=probe_samples_total,
+        probe_unknowns_total=probe_unknowns_total,
+    )
 
-    return CalibrationReport(
+    report = CalibrationReport(
         checkpoint_repo_id=checkpoint_repo_id,
         checkpoint_revision=checkpoint_revision,
         n_prompts=len(rows),
+        requested_prompts=requested_prompts or len(prompt_indices),
+        sample_mode=mode,
         metrics=metrics,
         pr_curve=pr_curve,
         compute_saved_per_in_zone=saved,
+        balance=balance,
         jitter=jitter_summaries,
         rows=rows,
     )
+    validate_calibration_report(report)
+    return report

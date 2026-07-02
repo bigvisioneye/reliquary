@@ -6,12 +6,18 @@ from pathlib import Path
 from typing import Any
 
 from harness.calibrate import run_calibration
-from harness.calibrate_metrics import CalibrationReport, write_calibration_csv
+from harness.calibrate_metrics import (
+    CalibrationReport,
+    calibration_report_dict,
+    write_calibration_csv,
+    write_calibration_report,
+)
 from harness.latency import latency_report_dict, measure_latency
 from harness.grail_check import GrailCheckResult, run_grail_fidelity
 from harness.latency_metrics import LatencyReport
 from harness.probe_logic import ProbeConfig
-from harness.slice import filter_prompt_indices, sample_prompt_indices, slice_for_window
+from harness.sampling import SampleMode, resolve_calibration_indices
+from harness.slice import slice_for_window
 
 
 @dataclass
@@ -20,6 +26,7 @@ class FullHarnessReport:
     checkpoint_revision: str
     randomness: str
     enforce_slice: bool
+    sample_mode: str
     prompt_indices: list[int]
     slice_bounds: tuple[int, int]
     calibration: CalibrationReport
@@ -50,6 +57,7 @@ def run_full_report(
     prompt_count: int = 10,
     seed: int = 0,
     enforce_slice: bool = False,
+    sample_mode: SampleMode = "uniform",
     env_name: str = "openmathinstruct",
     probe_config: ProbeConfig | None = None,
     bootstrap: bool = False,
@@ -61,22 +69,25 @@ def run_full_report(
     generation_runs: int = 3,
     proof_runs: int = 3,
     window_seconds: float = 45.0,
+    proofs_batched: bool = False,
 ) -> FullHarnessReport:
     import random
 
     rng = random.Random(seed)
     bounds = slice_for_window(randomness, env_name, len(env))
     if prompt_indices is None:
-        indices = sample_prompt_indices(
+        indices = resolve_calibration_indices(
             env,
             count=prompt_count,
+            seed=seed,
             randomness=randomness,
             env_name=env_name,
+            sample_mode=sample_mode,
             enforce_slice=enforce_slice,
             rng=rng,
         )
     else:
-        indices = filter_prompt_indices(prompt_indices, bounds, enforce=enforce_slice)
+        indices = prompt_indices
 
     calibration = run_calibration(
         model=model,
@@ -88,11 +99,18 @@ def run_full_report(
         probe_config=probe_config,
         bootstrap=bootstrap,
         jitter_repeats=jitter_repeats,
+        randomness=randomness,
+        enforce_slice=enforce_slice,
+        sample_mode=sample_mode,
+        requested_prompts=prompt_count,
+        env_name=env_name,
+        rng=rng,
     )
 
     grail_results: list[GrailCheckResult] = []
-    if run_grail and indices:
-        probe_prompt = env.get_problem(indices[0])["prompt"]
+    if run_grail and calibration.rows:
+        first_idx = calibration.rows[0].idx
+        probe_prompt = env.get_problem(first_idx)["prompt"]
         grail_results = run_grail_fidelity(
             model=model,
             tokenizer=tokenizer,
@@ -102,8 +120,8 @@ def run_full_report(
         )
 
     latency_report: LatencyReport | None = None
-    if run_latency:
-        idx = latency_prompt_idx if latency_prompt_idx is not None else indices[0]
+    if run_latency and calibration.rows:
+        idx = latency_prompt_idx if latency_prompt_idx is not None else calibration.rows[0].idx
         problem = env.get_problem(idx)
         latency_report = measure_latency(
             model=model,
@@ -114,6 +132,7 @@ def run_full_report(
             generation_runs=generation_runs,
             proof_runs=proof_runs,
             window_seconds=window_seconds,
+            proofs_batched=proofs_batched,
         )
 
     grail_payload = [asdict(r) for r in grail_results]
@@ -125,7 +144,8 @@ def run_full_report(
         checkpoint_revision=checkpoint_revision,
         randomness=randomness,
         enforce_slice=enforce_slice,
-        prompt_indices=indices,
+        sample_mode=calibration.sample_mode,
+        prompt_indices=[r.idx for r in calibration.rows],
         slice_bounds=bounds,
         calibration=calibration,
         grail_checks=grail_payload,
@@ -144,15 +164,10 @@ def write_full_report(path: str | Path, report: FullHarnessReport) -> None:
         "checkpoint_revision": report.checkpoint_revision,
         "randomness": report.randomness,
         "enforce_slice": report.enforce_slice,
+        "sample_mode": report.sample_mode,
         "slice_bounds": list(report.slice_bounds),
         "prompt_indices": report.prompt_indices,
-        "calibration": {
-            "n_prompts": report.calibration.n_prompts,
-            "metrics": asdict(report.calibration.metrics),
-            "compute_saved_per_in_zone": report.calibration.compute_saved_per_in_zone,
-            "pr_curve": [asdict(p) for p in report.calibration.pr_curve],
-            "jitter": [asdict(j) for j in report.calibration.jitter],
-        },
+        "calibration": calibration_report_dict(report.calibration),
         "grail_all_passed": report.grail_all_passed,
         "grail_checks": report.grail_checks,
         "latency": latency_report_dict(report.latency) if report.latency else None,
@@ -167,6 +182,9 @@ def write_report_artifacts(
     *,
     report_json: str | Path,
     calibration_csv: str | Path,
+    calibration_report_json: str | Path | None = None,
 ) -> None:
     write_full_report(report_json, report)
     write_calibration_csv(calibration_csv, report.calibration.rows)
+    cal_path = calibration_report_json or (Path(report_json).parent / "calibration_report.json")
+    write_calibration_report(cal_path, report.calibration)

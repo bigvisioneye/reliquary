@@ -57,13 +57,26 @@ class JitterSummary:
 
 
 @dataclass
+class CalibrationBalance:
+    n_in_zone_true: int
+    n_out_of_zone_true: int
+    k_histogram: dict[str, int]
+    unknown_rate: float
+    probe_samples_total: int
+    probe_unknowns_total: int
+
+
+@dataclass
 class CalibrationReport:
     checkpoint_repo_id: str
     checkpoint_revision: str
     n_prompts: int
+    requested_prompts: int
+    sample_mode: str
     metrics: ClassificationMetrics
     pr_curve: list[PRCurvePoint]
     compute_saved_per_in_zone: float
+    balance: CalibrationBalance
     jitter: list[JitterSummary]
     rows: list[CalibrationRow]
 
@@ -179,6 +192,52 @@ def summarize_jitter(
     )
 
 
+def build_calibration_balance(
+    rows: list[CalibrationRow],
+    *,
+    probe_samples_total: int,
+    probe_unknowns_total: int,
+) -> CalibrationBalance:
+    k_hist: dict[str, int] = {str(k): 0 for k in range(M_ROLLOUTS + 1)}
+    for row in rows:
+        k_hist[str(row.k)] = k_hist.get(str(row.k), 0) + 1
+    n_in_zone = sum(1 for r in rows if r.in_zone)
+    unknown_rate = (
+        probe_unknowns_total / probe_samples_total if probe_samples_total else 0.0
+    )
+    return CalibrationBalance(
+        n_in_zone_true=n_in_zone,
+        n_out_of_zone_true=len(rows) - n_in_zone,
+        k_histogram=k_hist,
+        unknown_rate=unknown_rate,
+        probe_samples_total=probe_samples_total,
+        probe_unknowns_total=probe_unknowns_total,
+    )
+
+
+def validate_calibration_report(report: CalibrationReport) -> None:
+    if report.requested_prompts > 0 and report.n_prompts == 0:
+        raise ValueError(
+            f"calibration produced 0 prompts (requested {report.requested_prompts}); "
+            "check --sample-mode, --randomness, explicit --prompts, and slice bounds"
+        )
+
+
+def calibration_report_dict(report: CalibrationReport) -> dict:
+    return {
+        "checkpoint_repo_id": report.checkpoint_repo_id,
+        "checkpoint_revision": report.checkpoint_revision,
+        "n_prompts": report.n_prompts,
+        "requested_prompts": report.requested_prompts,
+        "sample_mode": report.sample_mode,
+        "metrics": asdict(report.metrics),
+        "balance": asdict(report.balance),
+        "pr_curve": [asdict(p) for p in report.pr_curve],
+        "compute_saved_per_in_zone": report.compute_saved_per_in_zone,
+        "jitter": [asdict(j) for j in report.jitter],
+    }
+
+
 def write_calibration_csv(path: str | Path, rows: list[CalibrationRow]) -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -196,13 +255,7 @@ def write_calibration_csv(path: str | Path, rows: list[CalibrationRow]) -> None:
 def write_calibration_report(path: str | Path, report: CalibrationReport) -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "checkpoint_repo_id": report.checkpoint_repo_id,
-        "checkpoint_revision": report.checkpoint_revision,
-        "n_prompts": report.n_prompts,
-        "metrics": asdict(report.metrics),
-        "pr_curve": [asdict(p) for p in report.pr_curve],
-        "compute_saved_per_in_zone": report.compute_saved_per_in_zone,
-        "jitter": [asdict(j) for j in report.jitter],
-    }
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    out.write_text(
+        json.dumps(calibration_report_dict(report), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
