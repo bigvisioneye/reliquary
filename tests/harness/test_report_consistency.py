@@ -43,6 +43,9 @@ def _sample_report(*, n_prompts: int = 3) -> CalibrationReport:
         unknown_rate=0.1,
         probe_samples_total=n_prompts * 2,
         probe_unknowns_total=n_prompts,
+        label_rollouts_total=n_prompts * 8,
+        label_truncated_unscorable_total=0,
+        label_truncation_rate=0.0,
     )
     return CalibrationReport(
         checkpoint_repo_id="repo",

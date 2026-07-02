@@ -20,6 +20,8 @@ def run_probe(
     config: ProbeConfig | None = None,
     bootstrap: bool = False,
     band: tuple[float, float] | None = None,
+    gen_backend: str = "hf",
+    vllm_engine: Any | None = None,
 ) -> ProbeResult:
     from harness.generation import generate_rollout_tokens
 
@@ -37,6 +39,8 @@ def run_probe(
             problem["prompt"],
             max_new_tokens=cfg.max_probe_tokens,
             temperature=cfg.temperature,
+            gen_backend=gen_backend,  # type: ignore[arg-type]
+            vllm_engine=vllm_engine,
         )
         completion = tokenizer.decode(record.completion_token_ids)
         outcome = classify_probe_outcome(

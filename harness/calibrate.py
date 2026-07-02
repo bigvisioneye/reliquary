@@ -39,6 +39,8 @@ def prefilter_prompt_indices(
     count: int,
     probe_config: ProbeConfig,
     rng: random.Random,
+    gen_backend: str = "hf",
+    vllm_engine: Any | None = None,
 ) -> list[int]:
     cheap_cfg = ProbeConfig(
         max_samples=2,
@@ -55,6 +57,8 @@ def prefilter_prompt_indices(
             problem=problem,
             prompt_idx=idx,
             config=cheap_cfg,
+            gen_backend=gen_backend,  # type: ignore[arg-type]
+            vllm_engine=vllm_engine,
         )
         buckets[_prefilter_category(probe)].append(idx)
 
@@ -106,6 +110,9 @@ def run_calibration(
     enforce_slice: bool = False,
     sample_mode: SampleMode = "uniform",
     requested_prompts: int = 0,
+    max_label_tokens: int = 2048,
+    gen_backend: str = "hf",
+    vllm_engine: Any | None = None,
     env_name: str = "openmathinstruct",
     rng: random.Random | None = None,
 ) -> CalibrationReport:
@@ -128,6 +135,8 @@ def run_calibration(
             count=requested_prompts or len(indices),
             probe_config=cfg,
             rng=rng,
+            gen_backend=gen_backend,
+            vllm_engine=vllm_engine,
         )
     elif mode == "slice":
         indices = filter_prompt_indices(indices, bounds, enforce=True)
@@ -136,6 +145,8 @@ def run_calibration(
     jitter_summaries = []
     probe_samples_total = 0
     probe_unknowns_total = 0
+    label_rollouts_total = 0
+    label_truncated_unscorable_total = 0
 
     for idx in indices:
         problem = env.get_problem(idx)
@@ -146,6 +157,8 @@ def run_calibration(
             prompt_idx=idx,
             config=cfg,
             bootstrap=bootstrap,
+            gen_backend=gen_backend,  # type: ignore[arg-type]
+            vllm_engine=vllm_engine,
         )
         probe_samples_total += probe.probe_samples_used
         probe_unknowns_total += probe.unknowns
@@ -157,7 +170,12 @@ def run_calibration(
             checkpoint_repo_id=checkpoint_repo_id,
             checkpoint_revision=checkpoint_revision,
             bootstrap=bootstrap,
+            max_label_tokens=max_label_tokens,
+            gen_backend=gen_backend,
+            vllm_engine=vllm_engine,
         )
+        label_rollouts_total += label.label_rollouts
+        label_truncated_unscorable_total += label.truncated_unscorable_rollouts
         rows.append(
             CalibrationRow(
                 idx=idx,
@@ -183,6 +201,9 @@ def run_calibration(
                     checkpoint_repo_id=checkpoint_repo_id,
                     checkpoint_revision=checkpoint_revision,
                     bootstrap=bootstrap,
+                    max_label_tokens=max_label_tokens,
+                    gen_backend=gen_backend,
+                    vllm_engine=vllm_engine,
                 )
                 k_vals.append(j.k)
                 in_zone_flags.append(j.in_zone)
@@ -200,6 +221,8 @@ def run_calibration(
         rows,
         probe_samples_total=probe_samples_total,
         probe_unknowns_total=probe_unknowns_total,
+        label_rollouts_total=label_rollouts_total,
+        label_truncated_unscorable_total=label_truncated_unscorable_total,
     )
 
     report = CalibrationReport(

@@ -70,6 +70,27 @@ def _load_model_and_data(
     return data, loaded
 
 
+def _maybe_load_vllm_engine(
+    *,
+    loaded,
+    gen_backend: str,
+    gpu_mem_util: float,
+    max_model_len: int | None,
+):
+    if gen_backend != "vllm":
+        return None
+    from harness.vllm_backend import load_vllm_generator
+
+    model_path = getattr(loaded.model, "name_or_path", None)
+    if not model_path:
+        raise ValueError("could not resolve model path for vLLM backend")
+    return load_vllm_generator(
+        model_path,
+        gpu_memory_utilization=gpu_mem_util,
+        max_model_len=max_model_len,
+    )
+
+
 @app.command("resolve")
 def resolve_cmd(
     checkpoint_repo_id: str = typer.Option("", help="HF checkpoint repo id."),
@@ -106,11 +127,21 @@ def label_cmd(
     dtype: str = typer.Option("bfloat16", help="bf16/fp16/fp32 style dtype."),
     cache_dir: str = typer.Option("", help="Optional HF cache dir."),
     bootstrap: bool = typer.Option(False, help="Use bootstrap in-zone threshold."),
+    max_label_tokens: int = typer.Option(2048, help="Cap tokens for offline true_label generation."),
+    gen_backend: str = typer.Option("hf", help="Generation backend: hf or vllm."),
+    gpu_mem_util: float = typer.Option(0.85, help="vLLM GPU memory utilization."),
+    max_model_len: int = typer.Option(0, help="Optional vLLM max model length."),
 ) -> None:
     from harness.label import true_label
 
     data, loaded = _load_model_and_data(
         checkpoint_repo_id, checkpoint_revision, device, attn, dtype, cache_dir,
+    )
+    vllm_engine = _maybe_load_vllm_engine(
+        loaded=loaded,
+        gen_backend=gen_backend,
+        gpu_mem_util=gpu_mem_util,
+        max_model_len=max_model_len or None,
     )
     result = true_label(
         model=loaded.model,
@@ -120,6 +151,9 @@ def label_cmd(
         checkpoint_repo_id=checkpoint_repo_id,
         checkpoint_revision=checkpoint_revision,
         bootstrap=bootstrap,
+        max_label_tokens=max_label_tokens,
+        gen_backend=gen_backend,
+        vllm_engine=vllm_engine,
     )
     typer.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
 
@@ -137,6 +171,9 @@ def probe_cmd(
     max_probe_tokens: int = typer.Option(1536, help="Cap tokens per probe sample (raise if unknown_rate is high)."),
     temperature: float = typer.Option(-1.0, help="Override probe temperature; default T_PROTO."),
     bootstrap: bool = typer.Option(False, help="Use bootstrap in-zone band."),
+    gen_backend: str = typer.Option("hf", help="Generation backend: hf or vllm."),
+    gpu_mem_util: float = typer.Option(0.85, help="vLLM GPU memory utilization."),
+    max_model_len: int = typer.Option(0, help="Optional vLLM max model length."),
 ) -> None:
     from harness.probe import run_probe
     from harness.probe_logic import ProbeConfig
@@ -144,6 +181,12 @@ def probe_cmd(
 
     data, loaded = _load_model_and_data(
         checkpoint_repo_id, checkpoint_revision, device, attn, dtype, cache_dir,
+    )
+    vllm_engine = _maybe_load_vllm_engine(
+        loaded=loaded,
+        gen_backend=gen_backend,
+        gpu_mem_util=gpu_mem_util,
+        max_model_len=max_model_len or None,
     )
     cfg = ProbeConfig(
         max_samples=max_samples,
@@ -158,6 +201,8 @@ def probe_cmd(
         prompt_idx=prompt_idx,
         config=cfg,
         bootstrap=bootstrap,
+        gen_backend=gen_backend,
+        vllm_engine=vllm_engine,
     )
     typer.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
 
@@ -175,6 +220,7 @@ def calibrate_cmd(
     cache_dir: str = typer.Option("", help="Optional HF cache dir."),
     max_samples: int = typer.Option(6, help="Max sequential probe samples."),
     max_probe_tokens: int = typer.Option(1536, help="Cap tokens per probe sample (raise if unknown_rate is high)."),
+    max_label_tokens: int = typer.Option(2048, help="Cap tokens for offline true_label generation."),
     jitter_repeats: int = typer.Option(0, help="Re-run true_label R times per prompt."),
     bootstrap: bool = typer.Option(False, help="Use bootstrap in-zone threshold."),
     randomness: str = typer.Option("", help="Window randomness for slice filtering."),
@@ -183,6 +229,9 @@ def calibrate_cmd(
         "uniform",
         help="uniform | slice | prefilter — slice/prefilter need --randomness.",
     ),
+    gen_backend: str = typer.Option("hf", help="Generation backend: hf or vllm."),
+    gpu_mem_util: float = typer.Option(0.85, help="vLLM GPU memory utilization."),
+    max_model_len: int = typer.Option(0, help="Optional vLLM max model length."),
     csv_out: str = typer.Option("harness_out/calibration.csv", help="Per-prompt CSV path."),
     report_out: str = typer.Option("harness_out/calibration_report.json", help="Summary JSON path."),
 ) -> None:
@@ -192,6 +241,12 @@ def calibrate_cmd(
 
     data, loaded = _load_model_and_data(
         checkpoint_repo_id, checkpoint_revision, device, attn, dtype, cache_dir,
+    )
+    vllm_engine = _maybe_load_vllm_engine(
+        loaded=loaded,
+        gen_backend=gen_backend,
+        gpu_mem_util=gpu_mem_util,
+        max_model_len=max_model_len or None,
     )
     indices = _resolve_indices(
         data.env,
@@ -216,6 +271,9 @@ def calibrate_cmd(
         enforce_slice=enforce_slice,
         sample_mode=sample_mode,  # type: ignore[arg-type]
         requested_prompts=count,
+        max_label_tokens=max_label_tokens,
+        gen_backend=gen_backend,
+        vllm_engine=vllm_engine,
     )
     write_calibration_csv(csv_out, report.rows)
     write_calibration_report(report_out, report)
@@ -225,6 +283,7 @@ def calibrate_cmd(
         "sample_mode": report.sample_mode,
         "n_in_zone_true": report.balance.n_in_zone_true,
         "unknown_rate": report.balance.unknown_rate,
+        "label_truncation_rate": report.balance.label_truncation_rate,
         "metrics": asdict(report.metrics),
         "compute_saved_per_in_zone": report.compute_saved_per_in_zone,
         "csv_out": csv_out,
@@ -280,6 +339,9 @@ def latency_cmd(
     generation_runs: int = typer.Option(3, help="Timed 8-rollout generation runs."),
     proof_runs: int = typer.Option(3, help="Timed per-rollout proof runs."),
     proofs_batched: bool = typer.Option(False, help="Model proof as one batched pass over 8 rollouts."),
+    gen_backend: str = typer.Option("hf", help="Generation backend: hf or vllm."),
+    gpu_mem_util: float = typer.Option(0.85, help="vLLM GPU memory utilization."),
+    max_model_len: int = typer.Option(0, help="Optional vLLM max model length."),
     window_seconds: float = typer.Option(45.0, help="Target window duration for worker sizing."),
 ) -> None:
     from harness.latency import latency_report_dict, measure_latency
@@ -288,6 +350,12 @@ def latency_cmd(
     require_flash_attention_for_grail(runtime)
     data, loaded = _load_model_and_data(
         checkpoint_repo_id, checkpoint_revision, device, attn, dtype, cache_dir,
+    )
+    vllm_engine = _maybe_load_vllm_engine(
+        loaded=loaded,
+        gen_backend=gen_backend,
+        gpu_mem_util=gpu_mem_util,
+        max_model_len=max_model_len or None,
     )
     problem = data.env.get_problem(prompt_idx)
     report = measure_latency(
@@ -300,6 +368,8 @@ def latency_cmd(
         proof_runs=proof_runs,
         window_seconds=window_seconds,
         proofs_batched=proofs_batched,
+        gen_backend=gen_backend,
+        vllm_engine=vllm_engine,
     )
     typer.echo(json.dumps(latency_report_dict(report), indent=2, sort_keys=True))
 
@@ -318,6 +388,7 @@ def report_cmd(
     cache_dir: str = typer.Option("", help="Optional HF cache dir."),
     max_samples: int = typer.Option(6, help="Max sequential probe samples."),
     max_probe_tokens: int = typer.Option(1536, help="Cap tokens per probe sample (raise if unknown_rate is high)."),
+    max_label_tokens: int = typer.Option(2048, help="Cap tokens for offline true_label generation."),
     jitter_repeats: int = typer.Option(2, help="Re-run true_label R times per prompt."),
     bootstrap: bool = typer.Option(False, help="Use bootstrap in-zone threshold."),
     enforce_slice: bool = typer.Option(False, help="Alias for --sample-mode slice."),
@@ -325,6 +396,9 @@ def report_cmd(
         "slice",
         help="uniform | slice | prefilter — slice/prefilter restrict to window.",
     ),
+    gen_backend: str = typer.Option("hf", help="Generation backend: hf or vllm."),
+    gpu_mem_util: float = typer.Option(0.85, help="vLLM GPU memory utilization."),
+    max_model_len: int = typer.Option(0, help="Optional vLLM max model length."),
     skip_grail: bool = typer.Option(False, help="Skip Step 5 GRAIL/latency (CPU dev only)."),
     grail_rollouts: int = typer.Option(1, help="GRAIL fidelity rollouts to verify."),
     latency_prompt_idx: int = typer.Option(-1, help="Prompt for latency; default first sampled."),
@@ -351,6 +425,12 @@ def report_cmd(
     data, loaded = _load_model_and_data(
         checkpoint_repo_id, checkpoint_revision, device, attn, dtype, cache_dir,
     )
+    vllm_engine = _maybe_load_vllm_engine(
+        loaded=loaded,
+        gen_backend=gen_backend,
+        gpu_mem_util=gpu_mem_util,
+        max_model_len=max_model_len or None,
+    )
     indices = _resolve_indices(
         data.env,
         prompts=prompts,
@@ -375,6 +455,9 @@ def report_cmd(
         enforce_slice=enforce_slice,
         sample_mode=sample_mode,  # type: ignore[arg-type]
         probe_config=ProbeConfig(max_samples=max_samples, max_probe_tokens=max_probe_tokens),
+        max_label_tokens=max_label_tokens,
+        gen_backend=gen_backend,
+        vllm_engine=vllm_engine,
         bootstrap=bootstrap,
         jitter_repeats=jitter_repeats,
         run_grail=run_grail,
@@ -401,6 +484,7 @@ def report_cmd(
         "n_prompts": full.calibration.n_prompts,
         "n_in_zone_true": full.calibration.balance.n_in_zone_true,
         "unknown_rate": full.calibration.balance.unknown_rate,
+        "label_truncation_rate": full.calibration.balance.label_truncation_rate,
         "probe_precision": full.calibration.metrics.precision,
         "probe_recall": full.calibration.metrics.recall,
         "probe_f1": full.calibration.metrics.f1,

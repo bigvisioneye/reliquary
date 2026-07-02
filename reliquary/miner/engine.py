@@ -39,6 +39,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _window_state_still_signable(state, fresh_state) -> bool:
+    """Return True if window/randomness are unchanged and window is OPEN."""
+    if fresh_state.state != state.state:
+        return False
+    if fresh_state.window_n != state.window_n:
+        return False
+    return (fresh_state.randomness or "") == (state.randomness or "")
+
+
 async def maybe_pull_checkpoint(
     state,
     local_n: int,
@@ -213,7 +222,7 @@ class MiningEngine:
 
     def __init__(
         self,
-        vllm_model,
+        gen_model,
         hf_model,
         tokenizer,
         wallet,
@@ -225,15 +234,27 @@ class MiningEngine:
         proof_gpu: int = 1,
         max_new_tokens: int = MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override: str | None = None,
+        gen_backend: str = "hf",
+        vllm_engine=None,
+        gpu_memory_utilization: float = 0.85,
+        max_model_len: int | None = None,
     ) -> None:
-        self.vllm_model = vllm_model
+        # Generation handle (HF path), distinct from HF proof model.
+        self.gen_model = gen_model
+        # Back-compat alias for existing tests/callers.
+        self.vllm_model = gen_model
         self.hf_model = hf_model
+        # Real vLLM engine for generation-only path.
+        self.vllm_engine = vllm_engine
+        self.gen_backend = gen_backend
         self.tokenizer = tokenizer
         self.wallet = wallet
         self.vllm_gpu = vllm_gpu
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
+        self.gpu_memory_utilization = gpu_memory_utilization
+        self.max_model_len = max_model_len
 
         if envs is not None and mix is not None:
             self.envs = envs
@@ -376,6 +397,27 @@ class MiningEngine:
                 ]
                 merkle_root = _compute_merkle_root(rollout_submissions)
 
+                # Re-check window state immediately before signing/posting.
+                # Long generation tails can cross a window boundary; signing
+                # with stale window/randomness guarantees BAD_ENVELOPE_SIGNATURE.
+                try:
+                    fresh_state = await get_window_state_v2(url, client=client)
+                except SubmissionError:
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+                except Exception as exc:
+                    logger.debug("fresh state fetch failed before submit: %s", exc)
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+                if not _window_state_still_signable(state, fresh_state):
+                    logger.info(
+                        "skipped submission: window rolled over during generation "
+                        "(signed_window=%d current_window=%d)",
+                        state.window_n,
+                        fresh_state.window_n,
+                    )
+                    continue
+
                 # v2.3 design A': fetch the drand round just before the POST.
                 # The attached round determines the submission's chronological
                 # slot at seal time. Miss this and the validator rejects with
@@ -394,18 +436,18 @@ class MiningEngine:
                 _envelope_sig = sign_envelope(
                     wallet=self.wallet,
                     miner_hotkey=self.wallet.hotkey.ss58_address,
-                    window_start=state.window_n,
+                    window_start=fresh_state.window_n,
                     prompt_idx=prompt_idx,
                     merkle_root=merkle_root,
                     checkpoint_hash=local_hash,
                     drand_round=current_round,
-                    randomness=state.randomness or "",
+                    randomness=fresh_state.randomness or "",
                     nonce=_nonce,
                 ).hex()
                 request = BatchSubmissionRequest(
                     miner_hotkey=self.wallet.hotkey.ss58_address,
                     prompt_idx=prompt_idx,
-                    window_start=state.window_n,
+                    window_start=fresh_state.window_n,
                     merkle_root=merkle_root,
                     rollouts=rollout_submissions,
                     checkpoint_hash=local_hash,
@@ -417,7 +459,7 @@ class MiningEngine:
                     resp = await submit_batch_v2(url, request, client=client)
                     logger.info(
                         "submitted window=%d prompt=%d accepted=%s reason=%s",
-                        state.window_n, prompt_idx, resp.accepted,
+                        fresh_state.window_n, prompt_idx, resp.accepted,
                         resp.reason.value if hasattr(resp.reason, "value") else resp.reason,
                     )
                     results.append(resp)
@@ -467,31 +509,52 @@ class MiningEngine:
         except Exception:
             pass
 
-        # 2. Reload vllm_model on the generation GPU.
-        try:
-            new_gen = load_text_generation_model(
-                local_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation=ATTN_IMPLEMENTATION,
-            ).to(f"cuda:{self.vllm_gpu}").eval()
-        except Exception:
-            logger.exception(
-                "Failed to reload vllm_model from %s; miner generation is "
-                "BROKEN until the next successful pull. hf_model was swapped "
-                "so GRAIL proofs will be inconsistent.",
-                local_path,
-            )
-            self.vllm_model = None
-            self._loaded_checkpoint_path = None
-            return self.hf_model
+        # 2. Reload generation backend.
+        if self.gen_backend == "vllm":
+            try:
+                from harness.vllm_backend import load_vllm_generator
 
-        old_gen = self.vllm_model
-        self.vllm_model = new_gen
-        del old_gen
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
+                self.vllm_engine = load_vllm_generator(
+                    local_path,
+                    gpu_memory_utilization=self.gpu_memory_utilization,
+                    max_model_len=self.max_model_len,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to reload vLLM engine from %s; generation BROKEN "
+                    "until next successful pull.",
+                    local_path,
+                )
+                self.vllm_engine = None
+                self._loaded_checkpoint_path = None
+                return self.hf_model
+        else:
+            try:
+                new_gen = load_text_generation_model(
+                    local_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation=ATTN_IMPLEMENTATION,
+                ).to(f"cuda:{self.vllm_gpu}").eval()
+            except Exception:
+                logger.exception(
+                    "Failed to reload generation model from %s; miner generation is "
+                    "BROKEN until the next successful pull. hf_model was swapped "
+                    "so GRAIL proofs will be inconsistent.",
+                    local_path,
+                )
+                self.gen_model = None
+                self.vllm_model = None
+                self._loaded_checkpoint_path = None
+                return self.hf_model
+
+            old_gen = self.gen_model
+            self.gen_model = new_gen
+            self.vllm_model = new_gen
+            del old_gen
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         self._loaded_checkpoint_path = local_path
         logger.info("Checkpoint %s loaded into both models", local_path)
@@ -510,6 +573,27 @@ class MiningEngine:
         GRAIL forward pass would see extra EOS tokens the miner didn't
         "generate" in the usual sense.
         """
+        if self.gen_backend == "vllm":
+            if self.vllm_engine is None:
+                logger.warning("vLLM backend selected but engine is not loaded")
+                return []
+            from harness.vllm_backend import vllm_generate_rollouts
+
+            records = vllm_generate_rollouts(
+                self.vllm_engine,
+                self.tokenizer,
+                problem["prompt"],
+                n=M_ROLLOUTS,
+                temperature=T_PROTO,
+                top_p=TOP_P_PROTO,
+                top_k=TOP_K_PROTO,
+                max_new_tokens=self.max_new_tokens,
+            )
+            return [
+                {"tokens": r.tokens, "prompt_length": r.prompt_length}
+                for r in records
+            ]
+
         import torch
 
         from reliquary.protocol.tokens import encode_prompt
@@ -517,7 +601,7 @@ class MiningEngine:
 
         prompt_tokens = encode_prompt(self.tokenizer, problem["prompt"])
         prompt_length = len(prompt_tokens)
-        eos_ids = resolve_eos_token_ids(self.vllm_model, self.tokenizer)
+        eos_ids = resolve_eos_token_ids(self.gen_model, self.tokenizer)
         pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
         if pad_token_id is None and eos_ids:
             pad_token_id = min(eos_ids)
@@ -525,7 +609,7 @@ class MiningEngine:
         with torch.no_grad():
             input_tensor = torch.tensor(
                 [prompt_tokens] * M_ROLLOUTS,
-                device=getattr(self.vllm_model, "device", "cpu"),
+                device=getattr(self.gen_model, "device", "cpu"),
             )
             attention_mask = torch.ones_like(input_tensor)
             generate_kwargs = {
@@ -539,7 +623,7 @@ class MiningEngine:
             }
             if eos_ids:
                 generate_kwargs["eos_token_id"] = sorted(eos_ids)
-            outputs = self.vllm_model.generate(input_tensor, **generate_kwargs)
+            outputs = self.gen_model.generate(input_tensor, **generate_kwargs)
         rollouts = []
         for i in range(M_ROLLOUTS):
             seq = outputs[i].tolist()

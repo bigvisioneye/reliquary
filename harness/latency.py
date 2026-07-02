@@ -41,11 +41,20 @@ def measure_latency(
     proof_runs: int = 3,
     window_seconds: float = 45.0,
     proofs_batched: bool = False,
+    gen_backend: str = "hf",
+    vllm_engine: Any | None = None,
 ) -> LatencyReport:
     gen_times: list[float] = []
     for _ in range(generation_runs):
         t0 = time.perf_counter()
-        generate_m_rollouts(model, tokenizer, prompt, n_rollouts=M_ROLLOUTS)
+        generate_m_rollouts(
+            model,
+            tokenizer,
+            prompt,
+            n_rollouts=M_ROLLOUTS,
+            gen_backend=gen_backend,  # type: ignore[arg-type]
+            vllm_engine=vllm_engine,
+        )
         gen_times.append(time.perf_counter() - t0)
 
     proof_times: list[float] = []
@@ -53,7 +62,12 @@ def measure_latency(
 
     if proofs_batched:
         batch_generations = generate_m_rollout_dicts(
-            model, tokenizer, prompt, n_rollouts=M_ROLLOUTS,
+            model,
+            tokenizer,
+            prompt,
+            n_rollouts=M_ROLLOUTS,
+            gen_backend=gen_backend,  # type: ignore[arg-type]
+            vllm_engine=vllm_engine,
         )
         for _ in range(proof_runs):
             t0 = time.perf_counter()
@@ -63,7 +77,13 @@ def measure_latency(
             proof_batch_times.append(time.perf_counter() - t0)
     else:
         proof_generation = rollout_tokens_to_generation_dict(
-            generate_rollout_tokens(model, tokenizer, prompt),
+            generate_rollout_tokens(
+                model,
+                tokenizer,
+                prompt,
+                gen_backend=gen_backend,  # type: ignore[arg-type]
+                vllm_engine=vllm_engine,
+            ),
         )
         for _ in range(proof_runs):
             proof_times.append(

@@ -64,6 +64,9 @@ class CalibrationBalance:
     unknown_rate: float
     probe_samples_total: int
     probe_unknowns_total: int
+    label_rollouts_total: int
+    label_truncated_unscorable_total: int
+    label_truncation_rate: float
 
 
 @dataclass
@@ -197,6 +200,8 @@ def build_calibration_balance(
     *,
     probe_samples_total: int,
     probe_unknowns_total: int,
+    label_rollouts_total: int,
+    label_truncated_unscorable_total: int,
 ) -> CalibrationBalance:
     k_hist: dict[str, int] = {str(k): 0 for k in range(M_ROLLOUTS + 1)}
     for row in rows:
@@ -205,6 +210,11 @@ def build_calibration_balance(
     unknown_rate = (
         probe_unknowns_total / probe_samples_total if probe_samples_total else 0.0
     )
+    label_trunc_rate = (
+        label_truncated_unscorable_total / label_rollouts_total
+        if label_rollouts_total
+        else 0.0
+    )
     return CalibrationBalance(
         n_in_zone_true=n_in_zone,
         n_out_of_zone_true=len(rows) - n_in_zone,
@@ -212,6 +222,9 @@ def build_calibration_balance(
         unknown_rate=unknown_rate,
         probe_samples_total=probe_samples_total,
         probe_unknowns_total=probe_unknowns_total,
+        label_rollouts_total=label_rollouts_total,
+        label_truncated_unscorable_total=label_truncated_unscorable_total,
+        label_truncation_rate=label_trunc_rate,
     )
 
 

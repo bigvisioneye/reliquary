@@ -1,6 +1,7 @@
 """Miner prompt-picking strategy: pull random in-range, skip cooldown."""
 
 import random
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -147,6 +148,45 @@ def test_generate_rollouts_passes_full_eos_set_and_trims_first_eos():
     assert all(r["tokens"] == [10, 11, 1, 248046] for r in rollouts)
 
 
+def test_submitted_rollout_path_uses_protocol_cap():
+    import torch
+    from types import SimpleNamespace
+
+    from reliquary.constants import M_ROLLOUTS, MAX_NEW_TOKENS_PROTOCOL_CAP
+    from reliquary.miner.engine import MiningEngine
+
+    class _Tok:
+        chat_template = None
+        eos_token_id = 248046
+        pad_token_id = 248044
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            return [10, 11]
+
+    class _Model:
+        device = "cpu"
+        generation_config = SimpleNamespace(eos_token_id=248044)
+        config = SimpleNamespace(text_config=SimpleNamespace(eos_token_id=248044))
+
+        def __init__(self):
+            self.kwargs = None
+
+        def generate(self, input_tensor, **kwargs):
+            self.kwargs = kwargs
+            row = [10, 11, 1, 248046]
+            return torch.tensor([row] * input_tensor.shape[0])
+
+    eng = object.__new__(MiningEngine)
+    eng.gen_backend = "hf"
+    eng.tokenizer = _Tok()
+    eng.gen_model = _Model()
+    eng.max_new_tokens = MAX_NEW_TOKENS_PROTOCOL_CAP
+
+    eng._generate_m_rollouts({"prompt": "p"}, "00")
+    assert eng.gen_model.kwargs["max_new_tokens"] == MAX_NEW_TOKENS_PROTOCOL_CAP
+
+
 def test_pick_prompt_respects_explicit_range():
     env = FakeEnv()  # len 100
     rng = random.Random(1)
@@ -196,3 +236,133 @@ def test_pick_env_and_prompt_confines_to_window():
         name, idx = pick_env_and_prompt(envs, mix, cooldown, rng=rng, randomness=rand)
         assert name == "openmathinstruct"
         assert lo <= idx < hi
+
+
+def test_generate_rollouts_routes_to_vllm_backend(monkeypatch):
+    from types import SimpleNamespace
+
+    from reliquary.constants import M_ROLLOUTS
+    from reliquary.miner.engine import MiningEngine
+
+    eng = object.__new__(MiningEngine)
+    eng.gen_backend = "vllm"
+    eng.vllm_engine = object()
+    eng.tokenizer = object()
+    eng.max_new_tokens = 128
+
+    called = {}
+
+    def _fake_vllm(_engine, _tok, _prompt, **kwargs):
+        called["n"] = kwargs["n"]
+        return [
+            SimpleNamespace(tokens=[1, 2, 3], prompt_length=1)
+            for _ in range(M_ROLLOUTS)
+        ]
+
+    monkeypatch.setattr("harness.vllm_backend.vllm_generate_rollouts", _fake_vllm)
+
+    out = eng._generate_m_rollouts({"prompt": "p"}, "00")
+    assert len(out) == M_ROLLOUTS
+    assert called["n"] == M_ROLLOUTS
+
+
+@pytest.mark.asyncio
+async def test_mine_window_skips_submit_when_window_rolls(monkeypatch):
+    from types import SimpleNamespace
+
+    from reliquary.constants import M_ROLLOUTS
+    from reliquary.miner import engine as engine_mod
+    from reliquary.protocol.submission import GrpoBatchState, RolloutSubmission, WindowState
+
+    class _Env:
+        name = "openmathinstruct"
+
+        def __len__(self):
+            return 100
+
+        def get_problem(self, idx):
+            return {"prompt": f"p{idx}"}
+
+    eng = object.__new__(engine_mod.MiningEngine)
+    eng.validator_url_override = "http://validator"
+    eng.hf_model = object()
+    eng.wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hk"))
+    eng._load_checkpoint = lambda _p: eng.hf_model
+    eng._cooldown_per_env = {"openmathinstruct": set()}
+    env = _Env()
+    eng.envs = {env.name: env}
+    eng.mix = [(env.name, 1)]
+    eng._generate_m_rollouts = MagicMock(
+        return_value=[{"tokens": [1, 2, 3], "prompt_length": 1}] * M_ROLLOUTS
+    )
+    eng._build_rollout_submission = MagicMock(
+        return_value=RolloutSubmission(
+            tokens=[1, 2, 3],
+            reward=0.0,
+            commit={"tokens": [1, 2, 3]},
+            env_name=env.name,
+        )
+    )
+
+    monkeypatch.setattr(engine_mod, "pick_env_and_prompt", lambda *a, **k: (env.name, 7))
+
+    state_open = GrpoBatchState(
+        state=WindowState.OPEN,
+        window_n=10,
+        anchor_block=0,
+        cooldown_prompts=[],
+        valid_submissions=0,
+        checkpoint_n=0,
+        checkpoint_repo_id=None,
+        checkpoint_revision=None,
+        randomness="ab" * 32,
+    )
+    state_env = GrpoBatchState(
+        state=WindowState.OPEN,
+        window_n=10,
+        anchor_block=0,
+        cooldown_prompts=[],
+        valid_submissions=0,
+        checkpoint_n=0,
+        checkpoint_repo_id=None,
+        checkpoint_revision=None,
+        randomness="ab" * 32,
+    )
+    state_rolled = GrpoBatchState(
+        state=WindowState.OPEN,
+        window_n=11,
+        anchor_block=0,
+        cooldown_prompts=[],
+        valid_submissions=0,
+        checkpoint_n=0,
+        checkpoint_repo_id=None,
+        checkpoint_revision=None,
+        randomness="cd" * 32,
+    )
+
+    calls = {"n": 0}
+
+    async def _fake_get_state(*_args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return state_open
+        if calls["n"] == 2 and kwargs.get("env") == env.name:
+            return state_env
+        if calls["n"] == 3:
+            return state_rolled
+        raise asyncio.CancelledError()
+
+    submit_mock = MagicMock()
+
+    async def _fake_submit(*_args, **_kwargs):
+        submit_mock()
+        raise AssertionError("submit_batch_v2 should not be called on rolled window")
+
+    monkeypatch.setattr("reliquary.miner.submitter.get_window_state_v2", _fake_get_state)
+    monkeypatch.setattr("reliquary.miner.submitter.submit_batch_v2", _fake_submit)
+    monkeypatch.setattr("reliquary.miner.submitter.discover_validator_url", lambda *_a: "http://x")
+
+    with pytest.raises(asyncio.CancelledError):
+        await eng.mine_window(subtensor=object())
+
+    submit_mock.assert_not_called()

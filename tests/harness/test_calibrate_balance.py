@@ -18,13 +18,18 @@ def test_build_calibration_balance_counts_k_and_unknowns() -> None:
         ),
     ]
     balance = build_calibration_balance(
-        rows, probe_samples_total=7, probe_unknowns_total=3,
+        rows,
+        probe_samples_total=7,
+        probe_unknowns_total=3,
+        label_rollouts_total=16,
+        label_truncated_unscorable_total=4,
     )
     assert balance.n_in_zone_true == 1
     assert balance.n_out_of_zone_true == 1
     assert balance.k_histogram["8"] == 1
     assert balance.k_histogram["4"] == 1
     assert balance.unknown_rate == pytest.approx(3 / 7)
+    assert balance.label_truncation_rate == pytest.approx(4 / 16)
 
 
 def test_probe_config_default_max_probe_tokens() -> None:

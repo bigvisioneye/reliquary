@@ -16,6 +16,14 @@ Offline calibration and validation harness for Reliquary miner strategy work.
 
 Default dev flags: `--device cpu --attn eager`.
 
+For fast GPU generation, install vLLM and opt in:
+
+```bash
+pip install vllm
+```
+
+Then pass `--gen-backend vllm` (proof/GRAIL stays on HF).
+
 ## Commands
 
 ```bash
@@ -28,7 +36,7 @@ python3 -m harness label --prompt-idx 42 --checkpoint-repo-id <repo> --checkpoin
 
 # Step 4
 python3 -m harness calibrate --checkpoint-repo-id <repo> --checkpoint-revision <rev> \
-  --count 20 --device cpu --attn eager --max-probe-tokens 128 \
+  --count 20 --device cpu --attn eager --max-probe-tokens 128 --max-label-tokens 512 \
   --randomness <window-randomness-hex> --sample-mode slice
 
 # Step 5 (H200 only)
@@ -41,6 +49,7 @@ python3 -m harness latency --prompt-idx 42 --checkpoint-repo-id <repo> \
 # Step 7 one-shot report (H200 rental artifact) — recommended production run
 python3 -m harness report --checkpoint-repo-id <repo> --checkpoint-revision <rev> \
   --randomness <hex> --count 300 --sample-mode prefilter --max-probe-tokens 1536 \
+  --max-label-tokens 2048 --gen-backend vllm --gpu-mem-util 0.85 \
   --device cuda --attn flash_attention_2 \
   --report-out harness_out/full_report.json --csv-out harness_out/calibration.csv
 
@@ -55,6 +64,8 @@ python3 -m harness report ... --device cpu --attn eager --skip-grail --max-probe
 - Prompt slice uses `reliquary.shared.prompt_range.window_prompt_range`.
 - `harness/crowding.py` is a stub seam for future live-miner crowding weighting.
 - Latency `proof_per_rollout` times build+verify only on a pre-generated rollout; generation is measured separately as one batched 8-rollout call.
+- Generation backend can be `hf` (default, CPU-safe) or `vllm` (GPU generation only).
+- GRAIL build/verify always uses the HF model path; vLLM is generation-only.
 - `full_report.json` and `calibration_report.json` share the same calibration object (`n_prompts`, `metrics`, `balance`, `jitter`).
 
 ## Sampling modes
@@ -64,6 +75,7 @@ python3 -m harness report ... --device cpu --attn eager --skip-grail --max-probe
 - `prefilter`: draw a larger candidate pool from the slice, run a cheap 2-sample probe, and keep a balanced mix before expensive `true_label` runs.
 
 Use `--count 300` or more for stable precision/recall. Check `unknown_rate` in the report; if high, raise `--max-probe-tokens` (try 1024–2048).
+Check `label_truncation_rate` in the report; if high, raise `--max-label-tokens`.
 
 ## First H200 boot checklist
 

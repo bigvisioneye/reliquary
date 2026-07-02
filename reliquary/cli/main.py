@@ -179,6 +179,16 @@ def mine(
             "Useful for local testing — e.g. http://127.0.0.1:8888"
         ),
     ),
+    gen_backend: str = typer.Option(
+        "hf",
+        help="Generation backend: hf (default) or vllm (generation only).",
+    ),
+    gpu_mem_util: float = typer.Option(
+        0.85, help="vLLM gpu_memory_utilization (when --gen-backend vllm).",
+    ),
+    max_model_len: int = typer.Option(
+        0, help="Optional vLLM max_model_len (0 = vLLM default).",
+    ),
     log_level: str = typer.Option("INFO", help="Log level"),
 ):
     """Run Reliquary miner."""
@@ -263,15 +273,25 @@ def mine(
         logger.info("Loading models from %s...", initial_path)
         tokenizer = load_tokenizer(initial_path)
 
-        # Use 2 GPUs when available (vllm on 0, HF proof on 1). Fall back to
+        # Use 2 GPUs when available (generation on 0, HF proof on 1). Fall back to
         # sharing GPU 0 for test boxes that only expose one device.
         proof_device = "cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0"
+        gen_model = None
+        vllm_engine = None
+        if gen_backend == "vllm":
+            from harness.vllm_backend import load_vllm_generator
 
-        vllm_model = load_text_generation_model(
-            initial_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation=ATTN_IMPLEMENTATION,
-        ).to("cuda:0").eval()
+            vllm_engine = load_vllm_generator(
+                initial_path,
+                gpu_memory_utilization=gpu_mem_util,
+                max_model_len=max_model_len or None,
+            )
+        else:
+            gen_model = load_text_generation_model(
+                initial_path,
+                torch_dtype=torch.bfloat16,
+                attn_implementation=ATTN_IMPLEMENTATION,
+            ).to("cuda:0").eval()
 
         hf_model = load_text_generation_model(
             initial_path,
@@ -282,7 +302,7 @@ def mine(
         envs = load_environments(env_names)
         mix = [(n, w) for n, w in ENVIRONMENT_MIX if n in envs]
         engine = MiningEngine(
-            vllm_model,
+            gen_model,
             hf_model,
             tokenizer,
             wallet,
@@ -290,6 +310,10 @@ def mine(
             mix=mix,
             proof_gpu=0 if proof_device == "cuda:0" else 1,
             validator_url_override=validator_url or None,
+            gen_backend=gen_backend,
+            vllm_engine=vllm_engine,
+            gpu_memory_utilization=gpu_mem_util,
+            max_model_len=max_model_len or None,
         )
 
         # Seed engine's _loaded_checkpoint_path so the first

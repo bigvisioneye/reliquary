@@ -70,6 +70,9 @@ def run_full_report(
     proof_runs: int = 3,
     window_seconds: float = 45.0,
     proofs_batched: bool = False,
+    max_label_tokens: int = 2048,
+    gen_backend: str = "hf",
+    vllm_engine: Any | None = None,
 ) -> FullHarnessReport:
     import random
 
@@ -103,6 +106,9 @@ def run_full_report(
         enforce_slice=enforce_slice,
         sample_mode=sample_mode,
         requested_prompts=prompt_count,
+        max_label_tokens=max_label_tokens,
+        gen_backend=gen_backend,
+        vllm_engine=vllm_engine,
         env_name=env_name,
         rng=rng,
     )
@@ -133,6 +139,8 @@ def run_full_report(
             proof_runs=proof_runs,
             window_seconds=window_seconds,
             proofs_batched=proofs_batched,
+            gen_backend=gen_backend,
+            vllm_engine=vllm_engine,
         )
 
     grail_payload = [asdict(r) for r in grail_results]
