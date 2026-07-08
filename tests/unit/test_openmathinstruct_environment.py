@@ -249,3 +249,170 @@ def test_reward_handles_malformed_completion():
         except (AttributeError, TypeError):
             # None input is not a real protocol path; tolerated
             pass
+
+
+# ---------------------------------------------------------------------------
+# Dataset backing: full-repo virtual parquet, not an eager shard download.
+# A list-of-dicts stands in for the dataset (supports len + __getitem__), so
+# the env's shaping is exercised with no network.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _restore_omi_cache():
+    """Keep the class-level dataset cache from leaking a fake into other tests."""
+    from reliquary.environment.openmathinstruct import OpenMathInstructEnvironment
+    saved = OpenMathInstructEnvironment._dataset_cache
+    yield
+    OpenMathInstructEnvironment._dataset_cache = saved
+
+
+def _env_over(rows):
+    from reliquary.environment.openmathinstruct import OpenMathInstructEnvironment
+    OpenMathInstructEnvironment._dataset_cache = list(rows)
+    return OpenMathInstructEnvironment()
+
+
+def test_load_dataset_returns_virtual_parquet_for_repo_id():
+    from reliquary.environment.openmathinstruct import _load_dataset
+    from reliquary.environment.virtual_parquet import VirtualParquetDataset
+
+    ds = _load_dataset("nvidia/OpenMathInstruct-2", "rev123")
+    assert isinstance(ds, VirtualParquetDataset)
+
+
+def test_load_dataset_requests_problem_and_answer_columns():
+    """Only the two columns the env shapes are fetched — keeps row-groups tiny."""
+    from reliquary.environment.openmathinstruct import _load_dataset
+
+    ds = _load_dataset("nvidia/OpenMathInstruct-2", "rev123")
+    assert ds._columns == ["problem", "expected_answer"]
+
+
+def test_default_revision_is_pinned_sha():
+    """Both sides MUST read the same immutable revision (token binding +
+    prompt-range determinism); the default cannot be an unpinned 'main'."""
+    from reliquary.environment.openmathinstruct import OpenMathInstructEnvironment
+
+    rev = OpenMathInstructEnvironment._OMI_REVISION
+    assert len(rev) == 40 and all(c in "0123456789abcdef" for c in rev)
+
+
+def test_get_problem_shapes_prompt_and_ground_truth():
+    import hashlib
+    from reliquary.environment.openmathinstruct import _ANSWER_FORMAT_INSTRUCTION
+
+    env = _env_over([{"problem": "What is 2+2?", "expected_answer": "4"}])
+    p = env.get_problem(0)
+
+    assert p["prompt"] == "What is 2+2?" + _ANSWER_FORMAT_INSTRUCTION
+    assert p["ground_truth"] == "4"
+    assert p["id"] == hashlib.sha256(b"What is 2+2?").hexdigest()[:16]
+
+
+def test_len_reflects_dataset_not_shard_cap():
+    env = _env_over([{"problem": f"q{i}", "expected_answer": str(i)} for i in range(7)])
+    assert len(env) == 7
+
+
+def test_get_problem_modulo_wraps():
+    env = _env_over([{"problem": "q0", "expected_answer": "0"},
+                     {"problem": "q1", "expected_answer": "1"}])
+    assert env.get_problem(2)["ground_truth"] == "0"
+    assert env.get_problem(3)["ground_truth"] == "1"
+
+
+def test_expr_str_guard_symbols_flag():
+    from reliquary.environment.openmathinstruct import _expr_str_is_safe
+    # default (numeric) behaviour unchanged: a variable is rejected
+    assert _expr_str_is_safe("2 - b") is False
+    assert _expr_str_is_safe("2 + 3*(4)") is True
+    # with allow_symbols: single-letter variables allowed...
+    assert _expr_str_is_safe("2 - b", allow_symbols=True) is True
+    assert _expr_str_is_safe("x**2 + 2*x + 1", allow_symbols=True) is True
+    # ...but factorials and function calls still rejected
+    assert _expr_str_is_safe("5!", allow_symbols=True) is False
+    assert _expr_str_is_safe("exp(x)", allow_symbols=True) is False
+    assert _expr_str_is_safe("gamma(3)", allow_symbols=True) is False
+
+
+def test_expr_struct_guard_symbols_flag():
+    import sympy
+    from reliquary.environment.openmathinstruct import _expr_is_safe
+    x, b = sympy.symbols("x b")
+    # symbols rejected by default, allowed under the flag
+    assert _expr_is_safe(x) is False
+    assert _expr_is_safe(x, allow_symbols=True) is True
+    assert _expr_is_safe((x + 1) ** 2, allow_symbols=True) is True
+    assert _expr_is_safe(2 - b, allow_symbols=True) is True
+    # power tower / huge exponent still rejected even with symbols allowed
+    assert _expr_is_safe(x ** 50, allow_symbols=True) is False
+    assert _expr_is_safe(sympy.Pow(2, x, evaluate=False), allow_symbols=True) is False
+
+
+def test_reward_algebraic_reorder_is_equal():
+    from reliquary.environment.openmathinstruct import _compute_omi_reward
+    # the exact free-negative family seen in R2 replay (w19002)
+    assert _compute_omi_reward({"ground_truth": "-b+2"}, r"\boxed{2 - b}") == 1.0
+    assert _compute_omi_reward({"ground_truth": "a+b"}, r"\boxed{b + a}") == 1.0
+    assert _compute_omi_reward({"ground_truth": "x^2+2x+1"}, r"\boxed{(x+1)^2}") == 1.0
+    assert _compute_omi_reward({"ground_truth": "2x+2"}, r"\boxed{2(x+1)}") == 1.0
+
+
+def test_reward_algebraic_nonequivalent_still_zero():
+    from reliquary.environment.openmathinstruct import _compute_omi_reward
+    assert _compute_omi_reward({"ground_truth": "2+b"}, r"\boxed{2 - b}") == 0.0
+    assert _compute_omi_reward({"ground_truth": "x^2"}, r"\boxed{x^3}") == 0.0
+    assert _compute_omi_reward({"ground_truth": "a+c"}, r"\boxed{a + b}") == 0.0
+
+
+def test_reward_rounding_stays_out_of_symbolic_path():
+    from reliquary.environment.openmathinstruct import _compute_omi_reward
+    # numbers have no free symbols -> numeric path governs -> rounding rejected
+    assert _compute_omi_reward({"ground_truth": "8.57"}, r"\boxed{60/7}") == 0.0
+    assert _compute_omi_reward({"ground_truth": "\\frac{5}{3}"}, r"\boxed{1.67}") == 0.0
+    assert _compute_omi_reward({"ground_truth": "4"}, r"\boxed{3.1}") == 0.0
+
+
+def test_reward_symbolic_adversarial_no_hang():
+    from reliquary.environment.openmathinstruct import _compute_omi_reward
+    # DoS-shaped payloads must return quickly as 0.0, never raise/hang
+    assert _compute_omi_reward({"ground_truth": "x"}, r"\boxed{9^9^9^9}") == 0.0
+    assert _compute_omi_reward({"ground_truth": "x"}, r"\boxed{x!}") == 0.0
+    assert _compute_omi_reward({"ground_truth": "x"}, "\\boxed{" + "x+" * 60 + "x}") == 0.0
+
+
+def test_reward_symbolic_expansion_bomb_rejected():
+    import time
+    from reliquary.environment.openmathinstruct import _compute_omi_reward
+    # in-cap, single-letter algebra whose expand() would blow up combinatorially
+    bomb = "(" + "+".join("abcdefghijklmno") + ")^10"  # 15 distinct symbols ^10
+    start = time.perf_counter()
+    assert _compute_omi_reward({"ground_truth": "x"}, r"\boxed{" + bomb + "}") == 0.0
+    assert time.perf_counter() - start < 2.0
+    # repeated-symbol variant
+    bomb2 = "(" + "+".join(["a"] * 40) + ")^10"
+    start = time.perf_counter()
+    assert _compute_omi_reward({"ground_truth": "a"}, r"\boxed{" + bomb2 + "}") == 0.0
+    assert time.perf_counter() - start < 2.0
+    # legitimate low-complexity equivalence STILL upgrades
+    assert _compute_omi_reward({"ground_truth": "x^2+2x+1"}, r"\boxed{(x+1)^2}") == 1.0
+
+
+def test_reward_symbolic_float_exponent_bomb_rejected():
+    import time
+    from reliquary.environment.openmathinstruct import _compute_omi_reward
+    # Float-typed exponent (a+..+o)**10.0 must be blocked by the structural bound,
+    # not left to sympy's internal expand gating.
+    bomb = "(" + "+".join("abcdefghijklmno") + ")^10.0"
+    start = time.perf_counter()
+    assert _compute_omi_reward({"ground_truth": "x"}, r"\boxed{" + bomb + "}") == 0.0
+    assert time.perf_counter() - start < 2.0
+    # a legit integer-power equivalence still upgrades
+    assert _compute_omi_reward({"ground_truth": "x^2+2x+1"}, r"\boxed{(x+1)^2}") == 1.0
+
+
+def test_reward_numeric_and_structured_not_regressed():
+    from reliquary.environment.openmathinstruct import _compute_omi_reward
+    assert _compute_omi_reward({"ground_truth": "1/2"}, r"\boxed{0.5}") == 1.0
+    assert _compute_omi_reward({"ground_truth": "82.50"}, r"\boxed{82.5}") == 1.0
+    assert _compute_omi_reward({"ground_truth": "43"}, r"\boxed{42}") == 0.0
