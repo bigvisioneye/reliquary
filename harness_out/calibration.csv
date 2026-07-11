@@ -1,0 +1,7 @@
+idx,k,true_sigma,in_zone,p_hat,probe_samples_used,decision,predicted_in_zone
+8147105,8,0.0,False,1.0,3,too_easy,False
+8149763,7,0.33071891388307384,False,1.0,3,too_easy,False
+8149346,7,0.33071891388307384,False,1.0,3,too_easy,False
+8147036,0,0.0,False,0.0,6,budget_exhausted,False
+8148964,0,0.0,False,0.0,6,budget_exhausted,False
+8148139,0,0.0,False,0.0,6,budget_exhausted,False

@@ -1,0 +1,431 @@
+{
+    "calibration": {
+      "balance": {
+        "k_histogram": {
+          "0": 3,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 2,
+          "8": 1
+        },
+        "label_rollouts_total": 48,
+        "label_truncated_unscorable_total": 20,
+        "label_truncation_rate": 0.4166666666666667,
+        "n_in_zone_true": 0,
+        "n_out_of_zone_true": 6,
+        "probe_samples_total": 27,
+        "probe_unknowns_total": 18,
+        "unknown_rate": 0.6666666666666666
+      },
+      "checkpoint_repo_id": "ReliquaryForge/qwen3.5-4b-reliquary",
+      "checkpoint_revision": "a9469f6e8098",
+      "compute_saved_per_in_zone": 0.0,
+      "jitter": [],
+      "metrics": {
+        "f1": 0.0,
+        "false_negatives": 0,
+        "false_positives": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "true_negatives": 6,
+        "true_positives": 0
+      },
+      "n_prompts": 6,
+      "pr_curve": [
+        {
+          "band_half_width": 0.05,
+          "f1": 0.0,
+          "p_hat_hi": 0.55,
+          "p_hat_lo": 0.45,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.1,
+          "f1": 0.0,
+          "p_hat_hi": 0.6,
+          "p_hat_lo": 0.4,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.15,
+          "f1": 0.0,
+          "p_hat_hi": 0.65,
+          "p_hat_lo": 0.35,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.2,
+          "f1": 0.0,
+          "p_hat_hi": 0.7,
+          "p_hat_lo": 0.3,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.25,
+          "f1": 0.0,
+          "p_hat_hi": 0.75,
+          "p_hat_lo": 0.25,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.3,
+          "f1": 0.0,
+          "p_hat_hi": 0.8,
+          "p_hat_lo": 0.2,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.35,
+          "f1": 0.0,
+          "p_hat_hi": 0.85,
+          "p_hat_lo": 0.15000000000000002,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.4,
+          "f1": 0.0,
+          "p_hat_hi": 0.9,
+          "p_hat_lo": 0.09999999999999998,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.45,
+          "f1": 0.0,
+          "p_hat_hi": 0.95,
+          "p_hat_lo": 0.04999999999999999,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        {
+          "band_half_width": 0.5,
+          "f1": 0.0,
+          "p_hat_hi": 1.0,
+          "p_hat_lo": 0.0,
+          "precision": 0.0,
+          "recall": 0.0
+        }
+      ],
+      "requested_prompts": 6,
+      "sample_mode": "prefilter"
+    },
+    "checkpoint_repo_id": "ReliquaryForge/qwen3.5-4b-reliquary",
+    "checkpoint_revision": "a9469f6e8098",
+    "enforce_slice": false,
+    "grail_all_passed": true,
+    "grail_checks": [
+      {
+        "margin_is_fallback": false,
+        "passed": true,
+        "positions_checked": 32,
+        "positions_passed": 32,
+        "randomness": "3b3aad31309b422c60deb95f7c2ea390d254ab30651df5c68596d8800f8d7591",
+        "sketch_diff_max": 761,
+        "sketch_margins": [
+          {
+            "is_fallback_estimate": false,
+            "margin": 5023,
+            "passed": true,
+            "position": 23,
+            "sketch_diff": 0,
+            "tolerance": 5023
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5025,
+            "passed": true,
+            "position": 26,
+            "sketch_diff": 0,
+            "tolerance": 5025
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5031,
+            "passed": true,
+            "position": 39,
+            "sketch_diff": 0,
+            "tolerance": 5031
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5044,
+            "passed": true,
+            "position": 80,
+            "sketch_diff": 0,
+            "tolerance": 5044
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 4726,
+            "passed": true,
+            "position": 91,
+            "sketch_diff": 321,
+            "tolerance": 5047
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5050,
+            "passed": true,
+            "position": 104,
+            "sketch_diff": 0,
+            "tolerance": 5050
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5051,
+            "passed": true,
+            "position": 105,
+            "sketch_diff": 0,
+            "tolerance": 5051
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5058,
+            "passed": true,
+            "position": 139,
+            "sketch_diff": 0,
+            "tolerance": 5058
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5070,
+            "passed": true,
+            "position": 198,
+            "sketch_diff": 0,
+            "tolerance": 5070
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5075,
+            "passed": true,
+            "position": 229,
+            "sketch_diff": 0,
+            "tolerance": 5075
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5091,
+            "passed": true,
+            "position": 333,
+            "sketch_diff": 0,
+            "tolerance": 5091
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5092,
+            "passed": true,
+            "position": 343,
+            "sketch_diff": 0,
+            "tolerance": 5092
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5093,
+            "passed": true,
+            "position": 347,
+            "sketch_diff": 0,
+            "tolerance": 5093
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 4335,
+            "passed": true,
+            "position": 364,
+            "sketch_diff": 760,
+            "tolerance": 5095
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5101,
+            "passed": true,
+            "position": 413,
+            "sketch_diff": 0,
+            "tolerance": 5101
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5102,
+            "passed": true,
+            "position": 423,
+            "sketch_diff": 0,
+            "tolerance": 5102
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5103,
+            "passed": true,
+            "position": 431,
+            "sketch_diff": 0,
+            "tolerance": 5103
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5105,
+            "passed": true,
+            "position": 445,
+            "sketch_diff": 0,
+            "tolerance": 5105
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5026,
+            "passed": true,
+            "position": 453,
+            "sketch_diff": 80,
+            "tolerance": 5106
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5107,
+            "passed": true,
+            "position": 458,
+            "sketch_diff": 0,
+            "tolerance": 5107
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5111,
+            "passed": true,
+            "position": 496,
+            "sketch_diff": 0,
+            "tolerance": 5111
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5119,
+            "passed": true,
+            "position": 575,
+            "sketch_diff": 0,
+            "tolerance": 5119
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5120,
+            "passed": true,
+            "position": 582,
+            "sketch_diff": 0,
+            "tolerance": 5120
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5121,
+            "passed": true,
+            "position": 591,
+            "sketch_diff": 0,
+            "tolerance": 5121
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5124,
+            "passed": true,
+            "position": 623,
+            "sketch_diff": 0,
+            "tolerance": 5124
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5126,
+            "passed": true,
+            "position": 644,
+            "sketch_diff": 0,
+            "tolerance": 5126
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5132,
+            "passed": true,
+            "position": 707,
+            "sketch_diff": 0,
+            "tolerance": 5132
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 4907,
+            "passed": true,
+            "position": 781,
+            "sketch_diff": 232,
+            "tolerance": 5139
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5141,
+            "passed": true,
+            "position": 799,
+            "sketch_diff": 0,
+            "tolerance": 5141
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5149,
+            "passed": true,
+            "position": 896,
+            "sketch_diff": 0,
+            "tolerance": 5149
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 4393,
+            "passed": true,
+            "position": 955,
+            "sketch_diff": 761,
+            "tolerance": 5154
+          },
+          {
+            "is_fallback_estimate": false,
+            "margin": 5156,
+            "passed": true,
+            "position": 980,
+            "sketch_diff": 0,
+            "tolerance": 5156
+          }
+        ],
+        "worst_margin": 4335
+      }
+    ],
+    "jitter_band_recommendation": null,
+    "latency": {
+      "checkpoint_revision": "a9469f6e8098",
+      "cycle_p90_seconds": 31.058926102519035,
+      "generation": {
+        "median_seconds": 30.040170282125473,
+        "p90_seconds": 30.040170282125473,
+        "samples": 1
+      },
+      "generation_is_batched": true,
+      "proof_per_rollout": {
+        "median_seconds": 0.1259849090129137,
+        "p90_seconds": 0.12734447754919528,
+        "samples": 2
+      },
+      "proofs_batched": false,
+      "submission_cap": 8,
+      "suggested_workers": 6,
+      "window_seconds": 45.0
+    },
+    "prompt_indices": [
+      8147105,
+      8149763,
+      8149346,
+      8147036,
+      8148964,
+      8148139
+    ],
+    "randomness": "3b3aad31309b422c60deb95f7c2ea390d254ab30651df5c68596d8800f8d7591",
+    "sample_mode": "prefilter",
+    "slice_bounds": [
+      8144984,
+      8149984
+    ],
+    "suggested_workers": 6
+  }
