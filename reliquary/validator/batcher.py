@@ -22,7 +22,6 @@ from reliquary.constants import (
     MAX_EXPENSIVE_PROOF_FAILURES_PER_HOTKEY_PER_WINDOW,
     MAX_NEW_TOKENS_PROTOCOL_CAP,
     MAX_POST_TRIGGER_PROOF_CANDIDATES,
-    MAX_PROOF_CANDIDATES_PER_WINDOW,
     MAX_PROOF_GRADING_ATTEMPTS_PER_WINDOW,
     MAX_SEAL_QUEUE_DRAIN_SECONDS,
     MAX_SUBMISSIONS_PER_PROMPT,
@@ -33,6 +32,7 @@ from reliquary.constants import (
     CODE_SEMANTIC_AUTH_ENFORCE,
     TOKEN_AUTH_ENFORCE,
     ALL_TOKEN_AUTH_ENFORCE,
+    FORCED_SEED_ENFORCE,
 )
 from reliquary.environment.base import Environment
 from reliquary.shared.prompt_range import window_prompt_range
@@ -67,6 +67,7 @@ from reliquary.validator.auth_forensics import (
     code_semantic_counterfactual_max_findings_per_rollout,
     record_all_token_auth_findings,
     record_code_semantic_auth_findings,
+    record_forced_seed_shadow,
 )
 from reliquary.validator.reward_shape import detect_reward_shape_manipulation
 from reliquary.validator.rollout_patterns import detect_opposite_reward_clones
@@ -164,6 +165,48 @@ def _uses_validator_authoritative_reward(env: Any) -> bool:
 
 def _reward_matches_claim(actual: float, claimed: float, *, tolerance: float = 1e-6) -> bool:
     return abs(float(actual) - float(claimed)) <= tolerance
+
+
+def _forced_seed_verdict(n_stoch: int, n_match: int, enforce: bool) -> bool:
+    """True => reject the group for seed mismatch. Abstains on thin signal;
+    shadow (never rejects) when enforcement is off."""
+    from reliquary.constants import (
+        FORCED_SEED_CONSISTENCY_FLOOR, FORCED_SEED_MIN_STOCH_POSITIONS,
+    )
+    if not enforce:
+        return False
+    if n_stoch < FORCED_SEED_MIN_STOCH_POSITIONS:
+        return False
+    return (n_match / n_stoch) < FORCED_SEED_CONSISTENCY_FLOOR
+
+
+def _forced_seed_rollout_reject(per_rollout, enforce: bool) -> bool:
+    """True => reject because a SINGLE rollout is off the forced stream. The
+    group-average verdict dilutes a partial swap (a few curated rollouts hidden
+    among honest ones); this catches any one rollout that carries enough
+    stochastic positions yet falls below the per-rollout floor. ``per_rollout``
+    is a list of (n_stoch, n_match). Abstains on thin rollouts; shadow (never
+    rejects) when enforcement is off."""
+    from reliquary.constants import (
+        FORCED_SEED_ROLLOUT_FLOOR, FORCED_SEED_ROLLOUT_MIN_STOCH,
+    )
+    if not enforce:
+        return False
+    for n_stoch, n_match in per_rollout:
+        if (n_stoch >= FORCED_SEED_ROLLOUT_MIN_STOCH
+                and (n_match / n_stoch) < FORCED_SEED_ROLLOUT_FLOOR):
+            return True
+    return False
+
+
+def _is_missing_kwarg_typeerror(exc: TypeError, kwarg: str) -> bool:
+    """True iff ``exc`` is Python's own "unexpected keyword argument" TypeError
+    for ``kwarg`` (e.g. a legacy/stub verifier signature), as opposed to some
+    other internal TypeError that merely happens to mention ``kwarg`` in its
+    message. A bare substring test on ``kwarg`` alone would swallow the latter
+    and silently disable the forced-seed gate every rollout."""
+    msg = str(exc)
+    return "unexpected keyword argument" in msg and kwarg in msg
 
 
 _PROOF_FAILURE_DEBT_STAGES = frozenset(
@@ -445,9 +488,9 @@ class GrpoWindowBatcher:
         self._proof_admission_lock = threading.Lock()
         self._proof_admission_count = 0
         # Total grading attempts admitted this window — the never-refunded
-        # anti-DoS ceiling that gates admission. ``_proof_admission_count``
-        # (GRAIL/GPU budget) is charged separately, after the reward-zone gate,
-        # so out_of_zone never consumes it; neither counter is refunded.
+        # anti-DoS ceiling that gates admission. ``_proof_admission_count`` is
+        # a telemetry counter of zone-valid submissions entering the GRAIL
+        # proof path (no longer a budget); neither counter is refunded.
         self._proof_grading_attempts = 0
         self._post_trigger_proof_admission_count = 0
         self._expensive_proof_failures_by_hotkey: dict[str, int] = {}
@@ -596,16 +639,11 @@ class GrpoWindowBatcher:
 
         Admission is gated only by the grading-attempts ceiling (never
         refunded — bounds total grader/queue work under spam) plus the
-        post-trigger straggler cap. The scarce GRAIL/GPU candidate budget is
-        NOT charged here: it is reserved later, AFTER the cheap reward-zone
-        gate, in ``_accept_locked`` via ``_try_reserve_grail_candidate``. That
-        way a high out_of_zone rate (e.g. opencode's binary rewards) cannot
-        burn the GRAIL budget on submissions that never reach the proof and
-        starve the env below B distinct. (Previously the GRAIL slot was
-        reserved here and refunded on out_of_zone — but the refund landed
-        after grading, so the window-open burst still hard-bounced on this
-        budget before any slot was freed, leaving the grader idle while the
-        window sealed short.)
+        post-trigger straggler cap and the per-hotkey proof-failure debt.
+        There is no separate GRAIL/GPU candidate budget: the drand-anchored
+        seal, this grading ceiling and the seal drain timeout already bound the
+        GPU work per window, so a zone-valid submission entering the proof is
+        only counted for telemetry, never rejected on a candidate budget.
         """
         with self._proof_admission_lock:
             if (
@@ -637,24 +675,21 @@ class GrpoWindowBatcher:
             self._proof_grading_attempts += 1
             return True, None
 
-    def _try_reserve_grail_candidate(self) -> bool:
-        """Charge the GRAIL/GPU candidate budget for a zone-valid submission.
+    def _note_grail_candidate(self) -> None:
+        """Count a zone-valid submission entering the GRAIL/GPU proof path.
 
-        Called from ``_accept_locked`` right after the reward-zone gate
-        passes — the point a submission actually becomes a candidate for the
-        expensive GRAIL forward pass (~5–25 s of GPU). Reserving here, rather
-        than at HTTP admission, means out_of_zone reward errors never consume
-        the budget (so no refund is needed): the window-open burst queues up
-        to the grading ceiling instead of hard-bouncing on this budget.
-        Returns False when the per-window GRAIL budget is exhausted — the env
-        already has more in-zone candidates than the GPU can verify this
-        window (and therefore far more than B distinct).
+        Telemetry only — the window is already bounded by the drand-anchored
+        seal (the B-th distinct prompt records the trigger round and later
+        rounds are dropped), the never-refunded grading-attempts ceiling, the
+        per-hotkey submission cap, the post-trigger straggler cap and the seal
+        drain timeout. The old per-window GRAIL candidate budget was a
+        pre-seal-drand relic: back when the 8-distinct seal did not fire it was
+        the only bound on GRAIL work within a window. It only starved honest
+        late arrivals whenever earlier candidates failed a post-reservation
+        gate (e.g. forced-seed) without refund, so it no longer rejects.
         """
         with self._proof_admission_lock:
-            if self._proof_admission_count >= MAX_PROOF_CANDIDATES_PER_WINDOW:
-                return False
             self._proof_admission_count += 1
-            return True
 
     # ----------------------------- ingestion -----------------------------
 
@@ -921,18 +956,17 @@ class GrpoWindowBatcher:
         sigma = rewards_std(rewards)
         if not is_in_zone(sigma, bootstrap=self.bootstrap):
             # Reward error (degenerate rollout rewards), not cheating. It never
-            # reaches GRAIL and never charged the GRAIL budget — that is
-            # reserved just below, only for zone-valid submissions — so there
-            # is nothing to refund. A high out_of_zone rate therefore cannot
-            # starve the env below B distinct.
+            # reaches the GRAIL proof path. A high out_of_zone rate is bounded
+            # upstream by the grading-attempts ceiling and cannot starve the
+            # env below B distinct.
             return reject(RejectReason.OUT_OF_ZONE, "zone")
 
-        # Zone-valid: now charge the scarce GRAIL/GPU candidate budget. Done
-        # here (post-grade), not at HTTP admission, so the window-open burst
-        # queues up to the grading ceiling rather than hard-bouncing on this
-        # budget while ~84% of it would have refunded as out_of_zone anyway.
-        if not self._try_reserve_grail_candidate():
-            return reject(RejectReason.BATCH_FILLED, "grail_candidate_budget_full")
+        # Zone-valid: entering the GRAIL/GPU proof path. Count it for telemetry
+        # only — the window is bounded by the drand seal + grading ceiling +
+        # drain timeout, not by a candidate budget (removed: it starved honest
+        # late arrivals when earlier candidates burned an unrefunded slot on a
+        # post-reservation gate such as forced-seed).
+        self._note_grail_candidate()
 
         # A reward=0 rollout whose final \boxed{} is malformed (empty,
         # special-token, or unclosed) produced no parseable answer — a fake
@@ -1016,6 +1050,17 @@ class GrpoWindowBatcher:
             except Exception:
                 canonical_force_ids = []
 
+        # Forced-seed group tally: summed across all rollouts in this
+        # submission, verdict decided once after the loop (see
+        # ``_forced_seed_verdict``) — per-rollout counts are too thin a
+        # sample to gate on individually.
+        from reliquary.environment.forced_sampling import u_at
+        grp_stoch = 0
+        grp_match = 0
+        # Per-rollout (n_stoch, n_match) — the per-rollout gate needs each
+        # rollout separately, since the group average hides a partial swap.
+        seed_per_rollout: list[tuple[int, int]] = []
+
         for rollout_idx, rollout in enumerate(request.rollouts):
             # `truncated` is a validator-set flag (overlong reward shaping, see
             # submission.py). Wipe any miner-supplied value at ingestion so only
@@ -1047,19 +1092,58 @@ class GrpoWindowBatcher:
             claimed_rand = (rollout.commit.get("beacon") or {}).get("randomness", "")
             if claimed_rand != self.randomness:
                 return reject(RejectReason.WRONG_RANDOMNESS, "randomness")
+            # Per-position forced-seed uniforms for this rollout's teacher-forced
+            # consistency check. Read completion_length here (ahead of the
+            # ``completion_len`` computed later at the sparse-outputs section)
+            # so the u-stream can accompany the verify call below.
+            _seed_completion_len = int(
+                (rollout.commit.get("rollout") or {}).get("completion_length", 0)
+            )
+            seed_u = [
+                u_at(
+                    self.randomness, request.miner_hotkey, request.prompt_idx,
+                    request.checkpoint_hash, rollout_idx, j,
+                )
+                for j in range(_seed_completion_len)
+            ]
             try:
                 proof = self._verify_commitment(
                     rollout.commit,
                     self.model,
                     self.randomness,
                     tokenizer=self.tokenizer,
+                    seed_u_values=seed_u,
                 )
             except TypeError as exc:
-                if "tokenizer" not in str(exc):
+                # Backward-compat fallback for stub verifiers (tests, legacy
+                # callers) that don't accept one or both of the newer kwargs.
+                # Retry narrowing from most- to least-featured signature
+                # rather than guessing which kwarg tripped it. Matched
+                # strictly against Python's "unexpected keyword argument"
+                # TypeError text (not a bare substring test) so a genuine
+                # internal TypeError raised inside a real verifier propagates
+                # instead of being masked and retried without seed_u_values.
+                if _is_missing_kwarg_typeerror(exc, "seed_u_values"):
+                    try:
+                        proof = self._verify_commitment(
+                            rollout.commit, self.model, self.randomness,
+                            tokenizer=self.tokenizer,
+                        )
+                    except TypeError as exc2:
+                        if not _is_missing_kwarg_typeerror(exc2, "tokenizer"):
+                            raise
+                        proof = self._verify_commitment(
+                            rollout.commit, self.model, self.randomness,
+                        )
+                elif _is_missing_kwarg_typeerror(exc, "tokenizer"):
+                    proof = self._verify_commitment(
+                        rollout.commit, self.model, self.randomness,
+                    )
+                else:
                     raise
-                proof = self._verify_commitment(
-                    rollout.commit, self.model, self.randomness
-                )
+            grp_stoch += proof.seed_n_stochastic
+            grp_match += proof.seed_n_match
+            seed_per_rollout.append((proof.seed_n_stochastic, proof.seed_n_match))
             if proof.sketch_diff_max > sketch_diff_max:
                 sketch_diff_max = proof.sketch_diff_max
             if not proof.all_passed:
@@ -1388,6 +1472,25 @@ class GrpoWindowBatcher:
                             lp_dev_max=lp_dev_max,
                             dist_q10_min=dist_q10_min,
                         )
+
+        # Forced-seed gate. Group verdict = summed counts (catches diffuse
+        # deviation); per-rollout verdict catches a single off-stream rollout
+        # the group average would dilute. Both shadow (compute + log, never
+        # reject) unless FORCED_SEED_ENFORCE is on.
+        # Only enforce when the checkpoint hash is pinned: an empty
+        # current_checkpoint_hash disables WRONG_CHECKPOINT, so the miner
+        # controls checkpoint_hash (a forced-seed derivation input) and could
+        # grind it -- don't reject on a stream whose seed inputs aren't bound.
+        seed_enforce = FORCED_SEED_ENFORCE and bool(self.current_checkpoint_hash)
+        group_reject = _forced_seed_verdict(grp_stoch, grp_match, seed_enforce)
+        rollout_reject = _forced_seed_rollout_reject(seed_per_rollout, seed_enforce)
+        if group_reject or rollout_reject:
+            logger.info(
+                "seed_mismatch hotkey=%s stoch=%d match=%d scope=%s",
+                hk, grp_stoch, grp_match, "group" if group_reject else "rollout",
+            )
+            return reject(RejectReason.SEED_MISMATCH, "forced_seed")
+        record_forced_seed_shadow(hk, request.prompt_idx, grp_stoch, grp_match)
 
         # Reward-shape metrics are still computed (they feed the softer
         # training-quarantine signal + archive telemetry) but no longer

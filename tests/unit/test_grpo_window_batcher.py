@@ -236,7 +236,7 @@ def test_grail_verifier_receives_tokenizer_for_sparse_pstop():
 
     seen_tokenizers = []
 
-    def tokenizer_aware_grail(commit, model, randomness, *, tokenizer=None):
+    def tokenizer_aware_grail(commit, model, randomness, *, tokenizer=None, seed_u_values=None):
         seen_tokenizers.append(tokenizer)
         return ProofResult(
             all_passed=True,
@@ -1736,20 +1736,18 @@ def test_seal_extension_boundary_fair_split_fires_end_to_end():
 
 
 def test_admission_gated_by_grading_ceiling_not_grail_budget():
-    """Admission counts grading attempts, not GRAIL candidates.
+    """Admission counts grading attempts; there is no GRAIL candidate budget.
 
-    The window-open burst must queue for grading up to the grading ceiling —
-    far beyond the smaller GRAIL/GPU budget — instead of hard-bouncing once the
-    GRAIL budget is notionally full. (The GRAIL budget is charged later, after
-    the reward-zone gate; see ``test_grail_candidate_reserved_after_zone_gate``
-    and ``test_grail_budget_caps_in_zone_submissions_at_accept``.)
+    The window-open burst queues for grading up to the grading ceiling instead
+    of hard-bouncing on a candidate budget. (Entering the proof after the
+    reward-zone gate only bumps a telemetry counter now; see
+    ``test_grail_candidate_reserved_after_zone_gate`` and
+    ``test_grail_candidate_budget_removed_no_reject_on_burst``.)
     """
     from reliquary.constants import (
-        MAX_PROOF_CANDIDATES_PER_WINDOW,
         MAX_PROOF_GRADING_ATTEMPTS_PER_WINDOW,
     )
 
-    assert MAX_PROOF_GRADING_ATTEMPTS_PER_WINDOW > MAX_PROOF_CANDIDATES_PER_WINDOW
     b = _make_batcher()
 
     # A burst larger than the GRAIL budget is still fully admitted for grading,
@@ -1788,26 +1786,20 @@ def test_grail_candidate_reserved_after_zone_gate():
     assert b.proof_admission_count == 1      # charged once the zone gate passed
 
 
-def test_grail_budget_caps_in_zone_submissions_at_accept(monkeypatch):
-    """The GRAIL budget still bounds GPU work — but at the proof step, on
-    zone-valid submissions only. Once exhausted, a further in-zone submission is
-    rejected BATCH_FILLED (the env already has more in-zone candidates than the
-    GPU can verify this window)."""
-    import reliquary.validator.batcher as batcher_mod
-
-    monkeypatch.setattr(batcher_mod, "MAX_PROOF_CANDIDATES_PER_WINDOW", 2)
+def test_grail_candidate_budget_removed_no_reject_on_burst():
+    """There is no per-window GRAIL candidate budget: a burst of zone-valid
+    submissions well past the old cap (32) is accepted, bounded only by the
+    grading ceiling. Entering the proof only bumps a telemetry counter, and no
+    submission is rejected BATCH_FILLED on a candidate budget."""
     b = _make_batcher()
 
-    a = b.accept_submission(_request(prompt_idx=1, hotkey="a"))
-    assert a.accepted is True, a.reason
-    c = b.accept_submission(_request(prompt_idx=2, hotkey="b"))
-    assert c.accepted is True, c.reason
-    assert b.proof_admission_count == 2
+    n = 40  # > the old MAX_PROOF_CANDIDATES_PER_WINDOW (32)
+    for i in range(n):
+        resp = b.accept_submission(_request(prompt_idx=i, hotkey=f"hk{i}"))
+        assert resp.accepted is True, (i, resp.reason)
 
-    # 3rd in-zone submission: GRAIL budget exhausted -> BATCH_FILLED at accept.
-    d = b.accept_submission(_request(prompt_idx=3, hotkey="c"))
-    assert d.accepted is False
-    assert d.reason == RejectReason.BATCH_FILLED
+    assert b.proof_admission_count == n
+    assert b.reject_counts.get(RejectReason.BATCH_FILLED.value, 0) == 0
 
 
 def test_proof_admission_rejects_hotkey_after_expensive_failure_debt():
@@ -2773,3 +2765,75 @@ def test_accept_in_range_passes_range_gate(monkeypatch):
     resp = b.accept_submission(_request(prompt_idx=lo, window_start=500))
     # Passes the range gate; may still hit a later gate, but never this one.
     assert resp.reason != RejectReason.PROMPT_OUT_OF_RANGE
+
+
+# ---- forced-seed group gate (Task 5) -------------------------------------
+
+
+def _grail_with_seed_counts(n_stoch: int, n_match: int):
+    """Stub verifier that opts into the (tokenizer, seed_u_values) signature
+    and reports a fixed per-rollout seed-consistency tally. The batcher sums
+    these across all 8 rollouts before deciding the group verdict."""
+    def _fn(commit, model, randomness, *, tokenizer=None, seed_u_values=None):
+        from reliquary.validator.verifier import ProofResult
+        return ProofResult(
+            all_passed=True, passed=1, checked=1,
+            seed_n_stochastic=n_stoch, seed_n_match=n_match,
+        )
+    return _fn
+
+
+def test_forced_seed_group_gate_rejects_below_floor_when_enforcing(monkeypatch):
+    """Aggregate over 8 rollouts: 80 stochastic positions, 8 matches (0.10)
+    is well below FORCED_SEED_CONSISTENCY_FLOOR (0.80). With FORCED_SEED_ENFORCE
+    on, the group is rejected SEED_MISMATCH after the per-rollout loop."""
+    import reliquary.validator.batcher as batcher_mod
+
+    monkeypatch.setattr(batcher_mod, "FORCED_SEED_ENFORCE", True)
+    b = _make_batcher(
+        window_start=500,
+        verify_commitment_proofs_fn=_grail_with_seed_counts(n_stoch=10, n_match=1),
+    )
+    b.current_checkpoint_hash = "sha256:test"   # pinned -> seed enforcement active
+    req = _request(rewards=[1.0] * 4 + [0.0] * 4)
+    resp = b.accept_submission(req)
+    assert resp.accepted is False
+    assert resp.reason == RejectReason.SEED_MISMATCH
+    assert len(b.valid_submissions()) == 0
+
+
+def test_forced_seed_gate_abstains_when_checkpoint_hash_unpinned(monkeypatch):
+    """When current_checkpoint_hash is empty the WRONG_CHECKPOINT gate is off,
+    so the miner controls checkpoint_hash -- a forced-seed derivation input he
+    could grind. Enforcement is coupled to a pinned hash: even with
+    FORCED_SEED_ENFORCE on and a failing match-rate, an unpinned-hash window
+    abstains instead of rejecting."""
+    import reliquary.validator.batcher as batcher_mod
+
+    monkeypatch.setattr(batcher_mod, "FORCED_SEED_ENFORCE", True)
+    b = _make_batcher(
+        window_start=500,
+        verify_commitment_proofs_fn=_grail_with_seed_counts(n_stoch=10, n_match=1),
+    )
+    b.current_checkpoint_hash = ""              # not yet published -> not pinned
+    req = _request(rewards=[1.0] * 4 + [0.0] * 4)
+    resp = b.accept_submission(req)
+    assert resp.reason != RejectReason.SEED_MISMATCH
+    assert resp.accepted is True
+
+
+def test_forced_seed_group_gate_shadow_when_not_enforcing(monkeypatch):
+    """Same low match-rate as above, but FORCED_SEED_ENFORCE is off -> shadow
+    only, submission is NOT rejected for SEED_MISMATCH."""
+    import reliquary.validator.batcher as batcher_mod
+
+    monkeypatch.setattr(batcher_mod, "FORCED_SEED_ENFORCE", False)
+    b = _make_batcher(
+        window_start=500,
+        verify_commitment_proofs_fn=_grail_with_seed_counts(n_stoch=10, n_match=1),
+    )
+    req = _request(rewards=[1.0] * 4 + [0.0] * 4)
+    resp = b.accept_submission(req)
+    assert resp.reason != RejectReason.SEED_MISMATCH
+    assert resp.accepted is True
+    assert len(b.valid_submissions()) == 1

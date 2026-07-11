@@ -149,24 +149,15 @@ REJECTED_LIST_CAP_PER_HOTKEY = 5
 # Default HTTP port the validator listens on for miner submissions.
 VALIDATOR_HTTP_PORT = 8888
 
-# GRAIL candidate budget per window: bounds submissions that reach the GPU
-# proof (~5-25 s each). Charged AFTER the cheap reward-zone gate, in
-# ``GrpoWindowBatcher._try_reserve_grail_candidate`` — NOT at HTTP admission —
-# so a submission rejected as OUT_OF_ZONE (degenerate rollout rewards: a reward
-# error, not cheating) never consumes it. This keeps a high out_of_zone rate
-# (e.g. opencode's binary code rewards) from burning the budget before the env
-# collects B distinct valid prompts. Admission itself is bounded by the
-# grading-attempts ceiling below, so the window-open burst queues for grading
-# instead of hard-bouncing on this budget. Submissions that reach GRAIL and
-# fail (GRAIL/integrity) still consume it — those reached the GPU.
-MAX_PROOF_CANDIDATES_PER_WINDOW = 32
-
 # Hard ceiling on total grading attempts (reward computation) admitted per
-# window — the anti-DoS / queue bound that OUT_OF_ZONE refunds must NOT relax.
+# window — the anti-DoS / queue bound and the outer cap on GPU proof work.
 # Counts every admitted submission and is never refunded, so a degenerate-reward
 # flood cannot grow the unbounded submit queue or saturate the grader pool.
-# Set above the GRAIL budget so an env with a low in-zone rate can still grade
-# enough submissions to reach B distinct valid prompts.
+# There is no separate per-window GRAIL candidate budget: the drand-anchored
+# 8-distinct seal, this ceiling and the seal drain timeout bound the work. The
+# old MAX_PROOF_CANDIDATES_PER_WINDOW (32) was a pre-seal-drand relic that only
+# starved honest late arrivals when earlier candidates failed a post-reservation
+# gate (e.g. forced-seed) without refund.
 MAX_PROOF_GRADING_ATTEMPTS_PER_WINDOW = 96
 
 # A hotkey that repeatedly reaches the expensive proof path and then fails
@@ -665,3 +656,40 @@ ALL_TOKEN_AUTH_ENFORCE = True
 CODE_SEMANTIC_AUTH_THRESHOLD = 0.001
 CODE_SEMANTIC_AUTH_ARGMAX_CONF = TOKEN_AUTH_ARGMAX_CONF
 CODE_SEMANTIC_AUTH_ENFORCE = False
+
+# ──────────────── FORCED-SEED SAMPLING ────────────────
+# Domain separation for the per-position public uniform u_{i,t}.
+FORCED_SEED_DOMAIN = "reliquary-forced-seed-v1"
+# A position counts toward the seed-consistency check only if its warped max
+# probability is below this (i.e. the forced draw actually chooses the token).
+FORCED_SEED_STOCHASTIC_MAXPROB = 0.99
+# Reject a group whose stochastic-position match rate is below this floor
+# (measured: honest ~0.92-0.96, non-forced ~0.60).
+FORCED_SEED_CONSISTENCY_FLOOR = 0.80
+# Below this many stochastic positions in a group, the gate abstains (accepts)
+# rather than risk a false reject on thin signal.
+FORCED_SEED_MIN_STOCH_POSITIONS = 30
+# Per-rollout hardening: the group-average floor dilutes a partial swap (7
+# honest rollouts at ~0.96 + 1 curated at ~0.60 still averages >0.80). Reject a
+# group if ANY single rollout with enough stochastic positions falls below this
+# per-rollout floor. Set lower than the group floor to absorb the higher
+# single-rollout variance (empirical single-rollout: honest 0.94-1.0, non-forced
+# 0.52-0.65); shadow-only until calibrated on the live floor.
+FORCED_SEED_ROLLOUT_FLOOR = 0.75
+# A single rollout is judged only if it carries at least this many stochastic
+# positions; below it the per-rollout check abstains (never false-reject a
+# short / peaked honest rollout).
+FORCED_SEED_ROLLOUT_MIN_STOCH = 20
+# Master switch for forced-seed ENFORCEMENT. False = shadow (compute + log the
+# consistency score, never reject); True = enforce (reject a group / rollout
+# below the floors). Ships True so merging the branch arms the gate directly --
+# merge ONLY once miners run the forced-seed client, else honest legacy miners
+# are rejected. Env override (FORCED_SEED_ENFORCE=false) is a no-redeploy kill
+# switch; any non-truthy value disables (never crashes, never auto-arms garbage).
+FORCED_SEED_ENFORCE = _os.environ.get(
+    "FORCED_SEED_ENFORCE", "true"
+).strip().lower() in ("1", "true", "yes", "on")
+# Wire-advertised on BatchSubmissionRequest.protocol_version by clients that
+# sample from the forced stream (0 = legacy/pre-forced-seed). Lets the operator
+# track adoption in the shadow window before arming enforcement.
+FORCED_SEED_PROTOCOL_VERSION = 1
